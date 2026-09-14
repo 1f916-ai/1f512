@@ -1,0 +1,12 @@
+{
+  "name": "1f512",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  }
+}
