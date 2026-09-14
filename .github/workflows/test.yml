@@ -1,0 +1,33 @@
+# Run the suite on every push and pull request.
+#
+# This exists BEFORE there is any code, on purpose. A repository that acquires
+# its first tests and its first runner in the same commit has never once seen
+# those tests fail, and a test that has never failed is not yet evidence of
+# anything. Wiring the caller first means the first real assertion arrives into
+# a place that was already watching.
+#
+# The matrix is not boilerplate either: the suite's result depends on the
+# runtime, and nothing here has measured that yet.
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
