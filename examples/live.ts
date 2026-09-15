@@ -35,8 +35,10 @@ const URL2 = process.env.RPC2;
 const A: Provider = { label: process.env.RPC1_LABEL ?? "provider-a", url: URL1 };
 const B: Provider = { label: process.env.RPC2_LABEL ?? "provider-b", url: URL2 };
 
-// How many blocks of logs to ask for. Ten because that is the smallest free-tier
-// ceiling we met; raise it when both endpoints can take it.
+// How many blocks of logs to ask for. Ten is the range Alchemy's free tier
+// answered for us before refusing more, so it is a default that clears the
+// ceilings noted above rather than the smallest of them. Raise it when both
+// endpoints can take it.
 const BLOCKS = Number(process.env.BLOCKS ?? 10);
 // USDC on Base, and the 1F916 escrow contract as a real subject with real history.
 const USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
