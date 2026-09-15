@@ -143,3 +143,51 @@ test("UNREADABLE is a first-class verdict, not an error", async () => {
   assert.equal(line.verdict, "UNREADABLE");
   assert.equal(line.rpc.length, 2, "and both disagreeing answers are kept, not one of them picked");
 });
+
+// ---------------------------------------------------------------------------
+// Two more guards found by mutation: remove either from the source and all 84
+// tests still pass. Both protect the record rather than the wording.
+// ---------------------------------------------------------------------------
+
+test("seal refuses a verdict that is not one of the four", async () => {
+  // Killing mutation: delete the VERDICTS.includes check from seal().
+  // The set is the point of the whole format -- HELD, BROKEN, UNREADABLE,
+  // DEFAULTED, with UNREADABLE and DEFAULTED published rather than smoothed.
+  // A fifth value would reach an append-only signed line no reader can classify,
+  // and, worse, a typo like "HELD " or "held" would be published as a verdict
+  // that is not one rather than refused at the door.
+  await assert.rejects(
+    seal(content({ verdict: "MAYBE" as never }), ""),
+    /unknown verdict/,
+    "a verdict outside the four must not reach the log",
+  );
+  await assert.rejects(seal(content({ verdict: "held" as never }), ""), /unknown verdict/);
+});
+
+test("a provider label is bounded, because it lands in an append-only file", async () => {
+  // Killing mutation: raise or drop the length bound in assertProviderLabel.
+  // The label is published verbatim on every line, so an unbounded one is not a
+  // style problem: it is a field a writer can pad with whatever text they like,
+  // including the URL-shaped content the rest of the guard exists to keep out.
+  const long = "l".repeat(65);
+  assert.throws(() => assertProviderLabel(long), /short trimmed label/);
+  assert.doesNotThrow(() => assertProviderLabel("l".repeat(64)), "64 is the bound, not 63");
+  // And it is enforced at seal(), not only by the helper -- a guard nobody calls
+  // is not a guard. This is the same pairing as the URL test above.
+  await assert.rejects(
+    seal(content({ rpc: [{ provider: long, method: "eth_getLogs", params: [], result: [], at_block: 1 }] }), ""),
+    /short trimmed label/,
+  );
+});
+
+test("canonical drops undefined rather than hashing the word", () => {
+  // Killing mutation: remove the `o[k] !== undefined` filter in canonical().
+  // An optional field left unset -- note, evidence, sig -- would then hash
+  // differently from the same field absent, and two honest readers building the
+  // same record would disagree about its hash. The chain would break for a
+  // reason no one could see in the published line.
+  assert.equal(canonical({ a: undefined, b: 1 }), '{"b":1}');
+  assert.equal(canonical({ a: undefined, b: 1 }), canonical({ b: 1 }), "absent and undefined are one record");
+  // Nested too: the filter has to apply at every depth, not just the top.
+  assert.equal(canonical({ o: { x: undefined, y: 2 } }), '{"o":{"y":2}}');
+});

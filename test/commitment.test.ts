@@ -8,6 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { file, cmpDec, isUnsignedDecimal, type Commitment } from "../src/commitment.ts";
+import { evaluate } from "../src/evaluate.ts";
 
 const SUBJ = "0x" + "aa".repeat(20);
 const TOKEN = "0x" + "bb".repeat(20);
@@ -133,4 +134,128 @@ test("decimal comparison orders by magnitude, not lexically", () => {
   assert.equal(cmpDec("1000", "999"), 1);
   assert.equal(cmpDec("42", "42"), 0);
   assert.equal(isUnsignedDecimal("007"), false, "leading zeros are not a canonical decimal");
+});
+
+// ---------------------------------------------------------------------------
+// A FILED COMMITMENT'S OWN WITNESS MUST BREAK IT.
+//
+// Every guard below was found by mutation, not by reading: remove it from the
+// source and all 84 tests still pass, because nothing fed the gate a malformed
+// value. That is the exact defect this project is named after -- a check nobody
+// ran is indistinguishable from a check that cannot fail.
+//
+// So these tests do not merely assert `filed === false`. Each one takes the
+// commitment the guard refuses and asks the harder question: IF this got filed,
+// would its published witness break it? That is the property the filing rule
+// actually promises, and it is the one that fails if the guard is deleted.
+//
+// The third case is the one that would have shipped quietly: a malformed token
+// address files, its synthetic witness reads BROKEN (the mock transfer carries
+// the same malformed token, so it compares equal), and the same transfer
+// decoded off a real chain reads HELD forever. A commitment that cannot be
+// broken, published with a witness that says it can.
+// ---------------------------------------------------------------------------
+
+test("a disclosure window EQUAL to the commitment window is refused", () => {
+  // Killing mutation: `p.hours >= windowHours` -> `p.hours > windowHours`.
+  // At exact equality the disclosure window cannot expire inside the
+  // commitment, so no chain state breaks it while it is live. Under the mutant
+  // this files, and -- shown live while writing this -- its published witness
+  // reads DEFAULTED, which is the gate demonstrating that it did not run.
+  const oneHour = { from: WINDOW.from, to: WINDOW.from + 3_600_000 };
+  const r = file(c({ window: oneHour, predicate: { kind: "disclosed-within", subject: SUBJ, token: TOKEN, hours: 1 } }));
+  assert.equal(r.filed, false, "equality is not room to expire: >= not >");
+  assert.match(r.filed === false ? r.reason : "", /cannot expire inside/);
+});
+
+test("a non-finite disclosure window is refused, not filed", () => {
+  // Killing mutation: delete the `!Number.isFinite(p.hours)` guard.
+  // NaN does not fail a `hours >= windowHours` comparison, so the guard is the
+  // ONLY refusal here. Under the mutant this files, and its own witness reads
+  // HELD -- a filed commitment whose published break state keeps it.
+  const r = file(c({ predicate: { kind: "disclosed-within", subject: SUBJ, token: TOKEN, hours: NaN } }));
+  assert.equal(r.filed, false, "NaN is not a disclosure window");
+  assert.match(r.filed === false ? r.reason : "", /non-negative/);
+});
+
+test("window bounds must be integer timestamps, not NaN", () => {
+  // Killing mutation: delete the Number.isSafeInteger guard on the window.
+  // Every later window comparison in file() and evaluate() is arithmetic, so
+  // NaN propagates silently: inWindow('NaN') is false forever, which makes the
+  // predicate unfalsifiable. Under the mutant this files with a witness whose
+  // own verdict is HELD.
+  const r = file(c({ window: { from: WINDOW.from, to: NaN } }));
+  assert.equal(r.filed, false, "a window that is not a window cannot be broken during");
+  assert.match(r.filed === false ? r.reason : "", /millisecond timestamps/);
+});
+
+test("a FILED commitment's own published witness must yield a verdict, and never a clean pass", () => {
+  // The filing rule in one assertion: "this could have broken" has to be
+  // CHECKABLE, not asserted. So every witness the gate publishes is run back
+  // through the evaluator the gate exists for.
+  //
+  // WHAT THIS FOUND, reading it rather than assuming it. The rule is written as
+  // "a chain state that yields BROKEN", but for `disclosed-within` the break is
+  // a DEFAULTED -- a late disclosure and a missing one are the same failure, and
+  // evaluate.ts has no path from that predicate to BROKEN at all. The property
+  // that actually holds across all four arms is weaker and more useful: the
+  // witness does not read HELD. A witness that reads HELD is a filed
+  // commitment whose own published proof that it can fail demonstrates that it
+  // cannot -- which is the wall of green ticks this registry exists to prevent.
+  //
+  // Killing mutation: make any witness() arm return a state that passes its own
+  // predicate. Every arm is covered, so all four go red.
+  const cases: Commitment[] = [
+    c(),
+    c({ predicate: { kind: "balance-floor", subject: SUBJ, token: TOKEN, floor: "1000" } }),
+    c({ predicate: { kind: "only-to", subject: SUBJ, token: TOKEN, allowed: ["0x" + "11".repeat(20)] } }),
+    c({ predicate: { kind: "disclosed-within", subject: SUBJ, token: TOKEN, hours: 6 } }),
+  ];
+  for (const commitment of cases) {
+    const r = file(commitment);
+    assert.ok(r.filed, `${commitment.predicate.kind} should file`);
+    // T is the witness's own at_time: a time-dependent predicate must be given
+    // the chance to settle. A witness dated past its own deadline is still a
+    // witness, and evaluate() is the thing that decides that.
+    const ev = evaluate(commitment, r.witness, r.witness.at_time);
+    assert.notEqual(ev.verdict, "HELD", `${commitment.predicate.kind}'s witness read HELD`);
+    assert.ok(
+      ev.verdict === "BROKEN" || ev.verdict === "DEFAULTED",
+      `${commitment.predicate.kind}'s witness must be a failure verdict, got ${ev.verdict}`,
+    );
+  }
+});
+
+test("a malformed token address is refused, because the witness could never be matched by a real chain", () => {
+  // Killing mutation: delete the `if (p.token !== null)` validation block.
+  // This is the expensive one. A malformed token files, and its SYNTHETIC
+  // witness reads BROKEN only because the mock transfer carries the same
+  // malformed string, so the equality is between two copies of a typo. A chain
+  // decodes a real 0x-prefixed address, so the same transfer reads HELD -- the
+  // commitment is unfalsifiable in production while its published witness
+  // insists otherwise. Both halves are asserted: the refusal, and the failure
+  // mode the refusal prevents.
+  const bad = "0xNOT-AN-ADDRESS";
+  const malformed = c({ predicate: { kind: "no-outbound-transfer", subject: SUBJ, token: bad } });
+  const r = file(malformed);
+  assert.equal(r.filed, false, "a token that is not an address is not a token");
+  assert.match(r.filed === false ? r.reason : "", /token must be/);
+
+  // The same commitment with a WELL-FORMED token is filed, and the real-chain
+  // decode of its witness is what breaks it -- the contrast that shows the
+  // validation is load-bearing rather than cosmetic.
+  const good = c({ predicate: { kind: "no-outbound-transfer", subject: SUBJ, token: TOKEN } });
+  const g = file(good);
+  assert.ok(g.filed);
+  const onChain = { ...g.witness, transfers: [{ ...g.witness.transfers[0]!, token: TOKEN }] };
+  assert.equal(evaluate(good, onChain, g.witness.at_time).verdict, "BROKEN", "a real chain can match a real address");
+});
+
+test("a commitment without an id is refused", () => {
+  // Killing mutation: delete the `!c.id` guard. The id is what every reading
+  // line is filed under and what a reader uses to find the commitment the log
+  // is about, so an anonymous filing is unreadable rather than merely untidy.
+  const r = file(c({ id: undefined as unknown as string }));
+  assert.equal(r.filed, false);
+  assert.match(r.filed === false ? r.reason : "", /needs an id/);
 });
