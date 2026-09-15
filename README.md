@@ -129,6 +129,13 @@ The site is a convenience; the log is the evidence.
 **Absence of a derivation is not proof of zero.** A balance we failed to fetch
 reads `UNREADABLE`, never `BROKEN`.
 
+**A transfer of nothing is not a transfer.** `transferFrom(subject, X, 0)`
+needs no allowance, so anyone can put any subject in a `Transfer` log's `from`
+for the price of gas -- and on 2026-08-31 three strangers did exactly that to
+the 1F916 treasury, 29 times, in the course of an address-poisoning run. A
+zero-value log never reads `BROKEN`; a value the decoder could not parse reads
+`UNREADABLE`, for the same reason a missing balance does.
+
 ## Status
 
 Selected, and it runs against Base mainnet today — see **Against a real chain**

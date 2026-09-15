@@ -17,8 +17,8 @@
 // So: no Date.now() anywhere in this file. T is an argument. A reader supplies
 // it, a test supplies it, and the answer is the same either way.
 
-import type { ChainState, Commitment, Transfer } from "./commitment.ts";
-import { cmpDec } from "./commitment.ts";
+import type { Address, ChainState, Commitment, Transfer } from "./commitment.ts";
+import { cmpDec, isUnsignedDecimal } from "./commitment.ts";
 import type { Verdict } from "./reading.ts";
 
 export interface Evaluation {
@@ -32,6 +32,47 @@ export interface Evaluation {
 /** Is a transfer inside this commitment's window? */
 function inWindow(t: number, c: Commitment): boolean {
   return t >= c.window.from && t < c.window.to;
+}
+
+/**
+ * The subject's outbound transfers inside the window -- the ones that MOVED
+ * something. Or a refusal to say, when a value cannot be read.
+ *
+ * A Transfer log with the subject in topic1 is not evidence that the subject
+ * did anything. ERC-20 `transferFrom(subject, X, 0)` needs no allowance:
+ * USDC's FiatToken requires `value <= allowed[from][msg.sender]`, and 0 <= 0
+ * is true with no allowance at all (OpenZeppelin's ERC20 behaves the same).
+ * Checked by eth_call on Base at 2026-09-15T19:3xZ from an address that has
+ * never held an allowance from the treasury: value 0 returns true, value 1
+ * reverts "transfer amount exceeds allowance". So ANY address can emit
+ * Transfer(subject, X, 0) for the price of gas, and the subject never signed
+ * a thing. Base mainnet carries the
+ * specimen: on 2026-08-31, three addresses that are not the 1F916 treasury
+ * emitted 29 zero-value USDC Transfer logs with the treasury as `from`, each to
+ * a lookalike of the treasury's real payee (address poisoning). Keyed on topic1
+ * alone, `no-outbound-transfer` publishes BROKEN against the treasury off a
+ * stranger's call -- a false accusation, permanently, in a signed append-only
+ * log. A transfer of nothing breaks nothing.
+ *
+ * And a value we cannot read is not a value of zero, for the same reason a
+ * missing balance is not a balance of zero: the decoder is the thing that is
+ * broken, and the honest verdict about a chain state we could not decode is
+ * UNREADABLE. It is never HELD (a real outflow hidden behind a bad decode) and
+ * never BROKEN (an accusation built on bytes nobody parsed).
+ */
+type Outbound = { ok: true; transfers: Transfer[] } | { ok: false; reason: string };
+
+function outboundIn(chain: ChainState, c: Commitment, subject: Address, token: Address | null): Outbound {
+  const transfers: Transfer[] = [];
+  for (const t of chain.transfers) {
+    if (t.from !== subject || t.token !== token || !inWindow(t.at_time, c)) continue;
+    if (!isUnsignedDecimal(t.value)) {
+      return { ok: false, reason: `transfer ${t.tx} carries a value that is not an unsigned decimal string` };
+    }
+    if (cmpDec(t.value, "0") === 0) continue; // moved nothing; anyone can emit this
+    transfers.push(t);
+  }
+  return { ok: true, transfers };
 }
 
 /**
@@ -53,9 +94,9 @@ export function evaluate(c: Commitment, chain: ChainState, T: number): Evaluatio
 
   switch (p.kind) {
     case "no-outbound-transfer": {
-      const bad = chain.transfers.find(
-        (t) => t.from === subject && t.token === p.token && inWindow(t.at_time, c),
-      );
+      const out = outboundIn(chain, c, subject, p.token);
+      if (!out.ok) return { verdict: "UNREADABLE", reason: out.reason };
+      const bad = out.transfers[0];
       if (bad) return { verdict: "BROKEN", reason: "outbound transfer in window", evidence: bad };
       return heldOrOpen(c, T, "no outbound transfer seen in window");
     }
@@ -81,18 +122,18 @@ export function evaluate(c: Commitment, chain: ChainState, T: number): Evaluatio
 
     case "only-to": {
       const allowed = new Set(p.allowed);
-      const bad = chain.transfers.find(
-        (t) => t.from === subject && t.token === p.token && inWindow(t.at_time, c) && !allowed.has(t.to),
-      );
+      const out = outboundIn(chain, c, subject, p.token);
+      if (!out.ok) return { verdict: "UNREADABLE", reason: out.reason };
+      const bad = out.transfers.find((t) => !allowed.has(t.to));
       if (bad) return { verdict: "BROKEN", reason: "transfer to an address outside the allowlist", evidence: bad };
       return heldOrOpen(c, T, "no transfer left the allowlist");
     }
 
     case "disclosed-within": {
       const deadlineMs = p.hours * 3_600_000;
-      const outflows = chain.transfers.filter(
-        (t) => t.from === subject && t.token === p.token && inWindow(t.at_time, c),
-      );
+      const out = outboundIn(chain, c, subject, p.token);
+      if (!out.ok) return { verdict: "UNREADABLE", reason: out.reason };
+      const outflows = out.transfers;
       for (const t of outflows) {
         const d = chain.disclosures?.[t.tx];
         if (d && d.at_time <= t.at_time + deadlineMs) continue; // disclosed in time

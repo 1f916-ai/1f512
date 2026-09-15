@@ -202,3 +202,103 @@ test("the reason distinguishes a window still running from one that closed", () 
   assert.match(evaluate(noOut, chain(), WINDOW.from + HOUR).reason, /window open/);
   assert.match(evaluate(noOut, chain(), WINDOW.to).reason, /window closed/);
 });
+
+// ---------------------------------------------------------------------------
+// A transfer of nothing is not a transfer. Specimen from Base mainnet.
+//
+// On 2026-08-31 three addresses that are not the 1F916 treasury emitted 29
+// zero-value USDC Transfer logs with the treasury in topic1, each to a lookalike
+// of the treasury's real payee. `transferFrom(subject, X, 0)` needs no
+// allowance, so anyone can do this to any subject for gas. The rows below are
+// the chain's, read from https://mainnet.base.org; recompute them with
+// eth_getLogs(USDC, topics [Transfer, TREASURY]) over block 50672847..50672872
+// and eth_getTransactionByHash on the two hashes.
+// ---------------------------------------------------------------------------
+
+const USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const TREASURY = "0xa7f7985eb19b8c44f12a0654df1ef89d1dd527c9";
+const REAL_PAYEE = "0xe8c936b80606df813c5c9cb14605e6adfd60c4d9";
+const LOOKALIKE = "0xe8c9cc9912039da5b91debcc7986ff09f652c4d9";
+const TREASURY_WINDOW = { from: 1788134000000, to: 1788136000000 };
+
+// tx.from 0xa0c3fe8fde7e3cf308ee9f77fcf439e0aa05e0dd, calling a contract at
+// 0xfa4071b58d87cbc7af904f4c02f64318167655a2. The treasury signed nothing.
+const spoofed: Transfer = {
+  tx: "0xd4552bbdf09120fd54834db302be36c376a8f07c60d5cc0d1433b87a8314ce0c",
+  from: TREASURY,
+  to: LOOKALIKE,
+  token: USDC,
+  value: "0",
+  at_block: 50672872,
+  at_time: 1788135091000,
+};
+
+// tx.from is the treasury itself, selector 0xa9059cbb (transfer). 1 USDC.
+const real: Transfer = {
+  tx: "0x474b6e7cef4cd9d20d4752460c216b37a9d9818e7ea59640bad58d32884a2a3c",
+  from: TREASURY,
+  to: REAL_PAYEE,
+  token: USDC,
+  value: "1000000",
+  at_block: 50672847,
+  at_time: 1788135041000,
+};
+
+const treasuryNoOut: Commitment = {
+  id: "treasury-no-outbound-usdc",
+  predicate: { kind: "no-outbound-transfer", subject: TREASURY, token: USDC },
+  window: TREASURY_WINDOW,
+};
+
+test("A ZERO-VALUE TRANSFER IS NOT AN OUTBOUND TRANSFER", () => {
+  // Killing mutation: drop the `cmpDec(t.value, "0") === 0` skip in
+  // outboundIn(). The registry then publishes BROKEN against the treasury on
+  // the strength of a stranger's zero-value transferFrom -- signed, chained,
+  // permanent -- and the treasury never moved a cent.
+  const r = evaluate(treasuryNoOut, chain({ transfers: [spoofed] }), TREASURY_WINDOW.to);
+  assert.equal(r.verdict, "HELD", "nothing left the treasury");
+  assert.equal(r.evidence, undefined, "no evidence, because nothing happened");
+
+  // The same spoof against the other two transfer predicates.
+  const onlyTo: Commitment = {
+    id: "treasury-only-to",
+    predicate: { kind: "only-to", subject: TREASURY, token: USDC, allowed: [REAL_PAYEE] },
+    window: TREASURY_WINDOW,
+  };
+  assert.equal(evaluate(onlyTo, chain({ transfers: [spoofed] }), TREASURY_WINDOW.to).verdict, "HELD",
+    "a zero-value log to an address outside the allowlist is not a transfer outside the allowlist");
+
+  const disclosed: Commitment = {
+    id: "treasury-disclosed-within",
+    predicate: { kind: "disclosed-within", subject: TREASURY, token: USDC, hours: 0.1 },
+    window: TREASURY_WINDOW,
+  };
+  assert.equal(evaluate(disclosed, chain({ transfers: [spoofed], disclosures: {} }), TREASURY_WINDOW.to + 100 * HOUR).verdict, "HELD",
+    "there is nothing to disclose, so there is nothing to default on");
+});
+
+test("the real transfer 50 seconds earlier still reads BROKEN, with its hash as evidence", () => {
+  // The control. The filter has to remove the spoof and ONLY the spoof. Kill
+  // this by filtering on anything wider than value === "0" (say, value below
+  // some threshold) and a 1 USDC outflow disappears from the record.
+  const r = evaluate(treasuryNoOut, chain({ transfers: [spoofed, real] }), TREASURY_WINDOW.to);
+  assert.equal(r.verdict, "BROKEN");
+  assert.equal((r.evidence as Transfer).tx, real.tx, "the evidence is the transfer that moved value");
+});
+
+test("a transfer whose value cannot be read is UNREADABLE, never HELD, never BROKEN", () => {
+  // The same rule as a missing balance: absence of a derivation is not proof
+  // of zero. A decoder that hands the evaluator a value it cannot parse has
+  // failed, and the only honest verdict about a state we did not decode is
+  // UNREADABLE.
+  //
+  // Killing mutations, both: treat an unparseable value as positive (HELD
+  // becomes BROKEN on garbage), or skip it like a zero (a real outflow hidden
+  // behind a bad decode reads HELD).
+  for (const value of ["", "0x0f4240", "1e6", "007", "-1", "NaN"]) {
+    const bad = { ...real, value };
+    const r = evaluate(treasuryNoOut, chain({ transfers: [bad] }), TREASURY_WINDOW.to);
+    assert.equal(r.verdict, "UNREADABLE", `value ${JSON.stringify(value)}`);
+    assert.match(r.reason, /not an unsigned decimal/);
+  }
+});
