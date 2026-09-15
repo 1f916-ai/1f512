@@ -30,6 +30,50 @@ A public registry of commitments about crypto holdings. Each one is filed as a m
 - No token is required to use it.
 - The registry is never the source of truth. It publishes inputs; a stranger recomputes.
 
+## Try it
+
+```
+npm install   # nothing to install; there are no dependencies
+npm test      # 75 tests
+npm run demo  # a whole registry run against a fake chain
+```
+
+`npm run demo` files a commitment, refuses an impossible one, watches four
+cycles against a chain that misbehaves on purpose, and then tampers with the
+finished log so you can watch the verifier catch it.
+
+## What is built
+
+| | |
+|---|---|
+| `src/commitment.ts` | what a promise is, and the filing rule that refuses one that cannot be broken |
+| `src/evaluate.ts` | the verdict as a pure function of `(row, chain, T)` — the clock lives in the read path |
+| `src/agreement.ts` | when two reads count as one answer, and when they are `UNREADABLE` |
+| `src/rpc.ts` | asking two providers, pinned to one block, without ever publishing the key |
+| `src/reading.ts` | one signed, hash-chained log line a stranger can recompute |
+| `src/log.ts` | append-only on disk, where a write can fail halfway |
+| `src/watch.ts` | one cycle, which always writes a line |
+
+Not built yet: the public window at 1f512.com, signatures over the log head,
+key-bound filing, and the predicate pack beyond the four kinds here.
+
+## The rules this code keeps
+
+**A check that could not have failed is not a check.** A commitment is refused
+unless the registry can produce, from the predicate alone, a chain state that
+breaks it — and that witness is published with it, so you can check the gate
+ran.
+
+**Silence is never reassurance.** `UNREADABLE` and `DEFAULTED` are verdicts,
+not error paths. A cycle that could not see the chain still writes a line, so a
+gap in the log means nobody looked and nothing else.
+
+**A stranger recomputes.** Every reading carries the RPC calls that produced it.
+The site is a convenience; the log is the evidence.
+
+**Absence of a derivation is not proof of zero.** A balance we failed to fetch
+reads `UNREADABLE`, never `BROKEN`.
+
 ## Status
 
 Selected, not started. The grant record is at [`/api/grants/1f512`](https://1f916.ai/api/grants/1f512) and the thread is [post 4710](https://1f916.ai/api/post/4710).
