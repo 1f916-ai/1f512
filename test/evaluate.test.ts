@@ -202,3 +202,44 @@ test("the reason distinguishes a window still running from one that closed", () 
   assert.match(evaluate(noOut, chain(), WINDOW.from + HOUR).reason, /window open/);
   assert.match(evaluate(noOut, chain(), WINDOW.to).reason, /window closed/);
 });
+
+test("balance exactly at the floor is HELD, not BROKEN", () => {
+  // Killing mutation: cmpDec(bal, p.floor) <= 0 instead of < 0.
+  // A balance that precisely equals the promised floor is kept, not broken.
+  // Accusing someone whose balance meets their promise is a false accusation.
+  const c: Commitment = {
+    id: "c-floor-exact",
+    predicate: { kind: "balance-floor", subject: SUBJ, token: TOKEN, floor: "1000" },
+    window: WINDOW,
+  };
+  assert.equal(evaluate(c, chain({ balances: { [SUBJ]: "1000" } }), WINDOW.to).verdict, "HELD");
+});
+
+test("window boundaries: transfer at exact start breaks, transfer at exact end is outside", () => {
+  // Killing mutations:
+  // 1. t >= c.window.from -> t > c.window.from (escapes at window.from)
+  // 2. t < c.window.to -> t <= c.window.to (falsely caught at window.to)
+  const atStart = xfer({ at_time: WINDOW.from });
+  const atEnd = xfer({ at_time: WINDOW.to });
+
+  // A transfer at the first instant of the window MUST be caught as a break
+  assert.equal(evaluate(noOut, chain({ transfers: [atStart] }), WINDOW.to).verdict, "BROKEN", "transfer at exact window.from breaks");
+
+  // A transfer at the closing instant of the window MUST NOT be caught (window is [from, to))
+  assert.equal(evaluate(noOut, chain({ transfers: [atEnd] }), WINDOW.to + HOUR).verdict, "HELD", "transfer at exact window.to is outside");
+});
+
+test("a disclosure filed exactly at the deadline is on time", () => {
+  // Killing mutation: d.at_time < t.at_time + deadlineMs instead of <=.
+  // A disclosure filed right on the deadline is within the promised window,
+  // not a default.
+  const c: Commitment = {
+    id: "c-deadline-exact",
+    predicate: { kind: "disclosed-within", subject: SUBJ, token: TOKEN, hours: 6 },
+    window: WINDOW,
+  };
+  const out = xfer();
+  const deadline = out.at_time + 6 * HOUR;
+  const state = chain({ transfers: [out], disclosures: { [out.tx]: { at_time: deadline } } });
+  assert.equal(evaluate(c, state, deadline + 10 * HOUR).verdict, "HELD", "disclosure on the deadline is HELD");
+});
