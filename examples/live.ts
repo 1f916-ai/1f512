@@ -8,14 +8,15 @@
 // single-sourcing with extra steps, and agreement.ts refuses it by label.
 //
 // WHAT THIS FOUND ON ITS FIRST REAL RUN, recorded because it is the point of
-// the whole design: asked for 2000 blocks, one provider answered and the other
+// the whole design: asked for a 2000-block range, one provider answered and the other
 // returned 413. A naive monitor takes the answer it got and publishes HELD.
 // This published UNREADABLE with `quicknode: http 413` and moved on, because
 // one provider answering is not evidence.
 //
 // Free-tier log ranges differ wildly per vendor and are the real operational
-// constraint: Alchemy free caps eth_getLogs at 10 blocks, QuickNode free at
-// about 5, dRPC free times out past a few hundred. A deployment that wants a
+// constraint. MEASURED, not read off anyone's documentation, and they will
+// move: on their free tiers Alchemy answered a 10-block eth_getLogs and refused
+// more, QuickNode about 5, dRPC timed out past a few hundred. A deployment that wants a
 // useful cadence needs at least one paid endpoint, and the second source can
 // stay free only if the range fits inside its ceiling.
 
