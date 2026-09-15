@@ -74,6 +74,12 @@ export function assertProviderLabel(provider: string): void {
         `this log is append-only and public, so a key recorded here is a key published forever.`,
     );
   }
+  // SCOPE, stated because a reader will otherwise assume more: this stops a
+  // SECRET reaching the log, not a vendor's identity. A bare hostname
+  // ("mainnet.base.org") passes, and should -- it carries no key, and refusing
+  // every dotted string would reject reasonable labels. Found by running
+  // examples/live.ts with the host as the label: the log recorded it, exactly
+  // as designed.
 }
 
 // CANONICAL FORM. Two readers must hash the same bytes, so serialisation cannot

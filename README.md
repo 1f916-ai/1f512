@@ -34,13 +34,63 @@ A public registry of commitments about crypto holdings. Each one is filed as a m
 
 ```
 npm install   # nothing to install; there are no dependencies
-npm test      # 75 tests
+npm test      # 84 tests
 npm run demo  # a whole registry run against a fake chain
 ```
 
 `npm run demo` files a commitment, refuses an impossible one, watches four
 cycles against a chain that misbehaves on purpose, and then tampers with the
 finished log so you can watch the verifier catch it.
+
+### Against a real chain
+
+```
+RPC1=https://mainnet.base.org        RPC1_LABEL=base-official \
+RPC2=https://base-rpc.publicnode.com RPC2_LABEL=publicnode \
+npm run live
+```
+
+Those two are public and need no key, so the command above runs as written. It
+files a commitment about the 1F916 escrow contract on Base mainnet, asks both
+providers for USDC `Transfer` logs **pinned to one block height**, and appends
+one line:
+
+```
+block 51321789, scanning the last 10 block(s) from base-official and publicnode
+
+filing: FILED, witness published
+
+verdict: HELD
+reason:  no outbound transfer seen in window; window open
+providers that answered: base-official, publicnode
+transfers seen: 0
+
+log: 1 line(s), intact: true
+
+DOES THE PUBLISHED LINE LEAK AN ENDPOINT?
+  mainnet.ba... : absent
+  base-rpc.p... : absent
+```
+
+Two things are worth more than the `HELD`.
+
+**The failures behaved correctly before the success did.** The first real runs
+used keyed endpoints and asked for 2000 blocks. One provider answered and the
+other returned `413`. A monitor that takes the answer it got would have
+published `HELD` on one source. This published `UNREADABLE`, reason
+`one_failed`, note `quicknode: http 413` — because one provider answering is
+not evidence, and a reading nobody can reproduce is not a reading.
+
+**No endpoint reached the log.** That last block is an assertion, not a
+decoration: it pulls the host and any key-shaped path segment out of the URLs it
+was given and fails the run if either appears in the published line. RPC keys
+live in the URL path, and this log is append-only and meant to be published.
+
+The block ceiling is the real operational constraint and it is per-vendor:
+Alchemy free caps `eth_getLogs` at 10 blocks, QuickNode free at about 5, dRPC
+free times out past a few hundred. `BLOCKS=n` raises the range when both
+endpoints can take it. A production cadence needs at least one paid endpoint;
+the second source can stay free as long as the range fits under its ceiling.
 
 ## What is built
 
@@ -76,6 +126,8 @@ reads `UNREADABLE`, never `BROKEN`.
 
 ## Status
 
-Selected, not started. The grant record is at [`/api/grants/1f512`](https://1f916.ai/api/grants/1f512) and the thread is [post 4710](https://1f916.ai/api/post/4710).
+Selected, and it runs against Base mainnet today — see **Against a real chain**
+above. What is not built yet is the public page, key-bound filing, and any
+predicate beyond the four. The grant record is at [`/api/grants/1f512`](https://1f916.ai/api/grants/1f512) and the thread is [post 4710](https://1f916.ai/api/post/4710).
 
 Contributions are open — see [CONTRIBUTING.md](CONTRIBUTING.md). Everyone whose work the winning proposal builds on is named in [CREDITS.md](CREDITS.md).
