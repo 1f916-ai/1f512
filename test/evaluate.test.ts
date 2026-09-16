@@ -202,3 +202,37 @@ test("the reason distinguishes a window still running from one that closed", () 
   assert.match(evaluate(noOut, chain(), WINDOW.from + HOUR).reason, /window open/);
   assert.match(evaluate(noOut, chain(), WINDOW.to).reason, /window closed/);
 });
+
+test("a signature NEVER changes a verdict: signed and unsigned evaluate identically", () => {
+  // INVARIANT from Issue #16:
+  // "A verified signature must never change a verdict. It says who made the promise,
+  // never whether the chain kept it. Same ordering as src/sign.ts: recomputable,
+  // then chained, then signed, and signing is the weakest of the three."
+  const unsigned: Commitment = {
+    id: "c-unsigned",
+    predicate: { kind: "no-outbound-transfer", subject: SUBJ, token: TOKEN },
+    window: WINDOW,
+  };
+  const signed: Commitment = {
+    ...unsigned,
+    id: "c-signed",
+    sig: "0x" + "aa".repeat(65),
+  };
+
+  // Case 1: Broken chain state
+  const brokenState = chain({ transfers: [xfer()] });
+  const evUnsignedBroken = evaluate(unsigned, brokenState, FROM);
+  const evSignedBroken = evaluate(signed, brokenState, FROM);
+  assert.equal(evUnsignedBroken.verdict, "BROKEN");
+  assert.equal(evSignedBroken.verdict, "BROKEN");
+  assert.equal(evUnsignedBroken.reason, evSignedBroken.reason);
+  assert.deepEqual(evUnsignedBroken.evidence, evSignedBroken.evidence);
+
+  // Case 2: Held chain state
+  const cleanState = chain({ transfers: [] });
+  const evUnsignedHeld = evaluate(unsigned, cleanState, FROM + HOUR);
+  const evSignedHeld = evaluate(signed, cleanState, FROM + HOUR);
+  assert.equal(evUnsignedHeld.verdict, "HELD");
+  assert.equal(evSignedHeld.verdict, "HELD");
+  assert.equal(evUnsignedHeld.reason, evSignedHeld.reason);
+});

@@ -18,7 +18,11 @@
 // anyone can publish a well-formed chain claiming to be ours. That is a real
 // attack and this closes it, and it closes nothing else.
 
+import { Buffer } from "node:buffer";
+import { createHmac } from "node:crypto";
 import { canonical, type Reading } from "./reading.ts";
+import type { Address, Commitment } from "./commitment.ts";
+import { canonicalFiling } from "./commitment.ts";
 
 export interface SignedHead {
   /** The hash of the last line this signature covers. */
@@ -135,4 +139,310 @@ export async function verifyHead(lines: Reading[], sh: SignedHead): Promise<Head
     };
   }
   return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Key-bound filing: subject signatures (EIP-191 personal_sign)
+// ---------------------------------------------------------------------------
+//
+// An entry in the registry is a promise about an address. A signature on that
+// filing proves WHO made the promise: the key controlling the subject address,
+// or a third party filing about someone else.
+//
+// Invariant (same ordering as above):
+//   1. Recomputable (the RPC inputs)
+//   2. Chained (the log hash)
+//   3. Signed (the subject key)
+//
+// A signature never changes a verdict. It says who made the promise, never
+// whether the chain kept it. An unfalsifiable commitment signed by the subject
+// is still refused; a broken commitment signed by the subject is still BROKEN.
+
+const RC = [
+  0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
+  0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
+  0x000000000000008an, 0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
+  0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
+  0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
+  0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n,
+];
+
+const RHO = [
+  [0, 36, 3, 41, 18],
+  [1, 44, 10, 45, 2],
+  [62, 6, 43, 15, 61],
+  [28, 55, 25, 21, 56],
+  [27, 20, 39, 8, 14],
+];
+
+function rol64(x: bigint, n: number): bigint {
+  const bn = BigInt(n);
+  return ((x << bn) | (x >> (64n - bn))) & 0xffffffffffffffffn;
+}
+
+function keccakF1600(state: bigint[]): void {
+  for (let round = 0; round < 24; round++) {
+    const C = new Array<bigint>(5);
+    for (let x = 0; x < 5; x++) {
+      C[x] = state[x]! ^ state[x + 5]! ^ state[x + 10]! ^ state[x + 15]! ^ state[x + 20]!;
+    }
+    const D = new Array<bigint>(5);
+    for (let x = 0; x < 5; x++) {
+      D[x] = C[(x + 4) % 5]! ^ rol64(C[(x + 1) % 5]!, 1);
+    }
+    for (let x = 0; x < 5; x++) {
+      for (let y = 0; y < 5; y++) {
+        state[x + y * 5]! ^= D[x]!;
+      }
+    }
+    const B = new Array<bigint>(25);
+    for (let x = 0; x < 5; x++) {
+      for (let y = 0; y < 5; y++) {
+        B[y + ((2 * x + 3 * y) % 5) * 5] = rol64(state[x + y * 5]!, RHO[x]![y]!);
+      }
+    }
+    for (let x = 0; x < 5; x++) {
+      for (let y = 0; y < 5; y++) {
+        state[x + y * 5] = B[x + y * 5]! ^ ((~B[((x + 1) % 5) + y * 5]!) & B[((x + 2) % 5) + y * 5]!);
+      }
+    }
+    state[0]! ^= RC[round]!;
+  }
+}
+
+/** Pure Keccak-256 (Ethereum standard padding 0x01 ... 0x80). */
+export function keccak256(data: Uint8Array | string): Buffer {
+  const msg = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
+  const rate = 136; // 1088 bits
+  const state = new Array<bigint>(25).fill(0n);
+  const padLen = rate - (msg.length % rate);
+  const padded = Buffer.alloc(msg.length + padLen);
+  msg.copy(padded, 0);
+  if (padLen === 1) {
+    padded[msg.length] = 0x81;
+  } else {
+    padded[msg.length] = 0x01;
+    padded[padded.length - 1] = 0x80;
+  }
+  for (let blockStart = 0; blockStart < padded.length; blockStart += rate) {
+    for (let i = 0; i < rate / 8; i++) {
+      state[i] = state[i]! ^ padded.readBigUInt64LE(blockStart + i * 8);
+    }
+    keccakF1600(state);
+  }
+  const out = Buffer.alloc(32);
+  for (let i = 0; i < 4; i++) {
+    out.writeBigUInt64LE(state[i]!, i * 8);
+  }
+  return out;
+}
+
+/** EIP-191 personal_sign message digest: keccak256("\x19Ethereum Signed Message:\n" + len + msg) */
+export function personalSignHash(message: string | Uint8Array): Buffer {
+  const msgBuf = typeof message === "string" ? Buffer.from(message, "utf8") : Buffer.from(message);
+  const prefix = Buffer.from("\x19Ethereum Signed Message:\n" + msgBuf.length, "utf8");
+  return keccak256(Buffer.concat([prefix, msgBuf]));
+}
+
+// secp256k1 curve parameters
+const P = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+const Gx = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n;
+const Gy = 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n;
+
+function mod(a: bigint, m: bigint = P): bigint {
+  const res = a % m;
+  return res >= 0n ? res : res + m;
+}
+
+function invMod(a: bigint, m: bigint = P): bigint {
+  let [t, newT] = [0n, 1n];
+  let [rem, newR] = [m, mod(a, m)];
+  while (newR !== 0n) {
+    const q = rem / newR;
+    [t, newT] = [newT, t - q * newT];
+    [rem, newR] = [newR, rem - q * newR];
+  }
+  if (rem > 1n) throw new Error("not invertible");
+  return t < 0n ? t + m : t;
+}
+
+function modPow(b: bigint, exp: bigint, m: bigint = P): bigint {
+  let res = 1n;
+  let base = mod(b, m);
+  let e = exp;
+  while (e > 0n) {
+    if (e & 1n) res = mod(res * base, m);
+    base = mod(base * base, m);
+    e >>= 1n;
+  }
+  return res;
+}
+
+type AffinePoint = [bigint, bigint] | null;
+
+function pointAdd(p1: AffinePoint, p2: AffinePoint): AffinePoint {
+  if (!p1) return p2;
+  if (!p2) return p1;
+  const [x1, y1] = p1;
+  const [x2, y2] = p2;
+  if (x1 === x2) {
+    if (y1 !== y2) return null; // point at infinity
+    if (y1 === 0n) return null;
+    const m = mod(mod(3n * mod(x1 * x1, P), P) * invMod(2n * y1, P), P);
+    const x3 = mod(m * m - 2n * x1, P);
+    const y3 = mod(m * (x1 - x3) - y1, P);
+    return [x3, y3];
+  }
+  const m = mod(mod(y2 - y1, P) * invMod(x2 - x1, P), P);
+  const x3 = mod(m * m - x1 - x2, P);
+  const y3 = mod(m * (x1 - x3) - y1, P);
+  return [x3, y3];
+}
+
+function pointMul(k: bigint, p: AffinePoint): AffinePoint {
+  let res: AffinePoint = null;
+  let cur: AffinePoint = p;
+  let scalar = mod(k, N);
+  while (scalar > 0n) {
+    if (scalar & 1n) res = pointAdd(res, cur);
+    cur = pointAdd(cur, cur);
+    scalar >>= 1n;
+  }
+  return res;
+}
+
+export function pubkeyToAddress(pubX: bigint, pubY: bigint): Address {
+  const buf = Buffer.alloc(64);
+  buf.write(pubX.toString(16).padStart(64, "0"), 0, 32, "hex");
+  buf.write(pubY.toString(16).padStart(64, "0"), 32, 32, "hex");
+  const hash = keccak256(buf);
+  return ("0x" + hash.subarray(12).toString("hex").toLowerCase()) as Address;
+}
+
+/**
+ * Recover the signer address from an EIP-191 personal_sign signature (r, s, v).
+ *
+ * Throws if the signature format is malformed, r/s out of bounds, s is malleable (EIP-2),
+ * or r does not define a point on secp256k1.
+ */
+export function recoverPersonalSign(message: string | Uint8Array, sigHex: string): Address {
+  if (typeof sigHex !== "string") throw new Error("signature must be a string");
+  const raw = sigHex.replace(/^0x/, "").toLowerCase();
+  if (!/^[0-9a-f]{130}$/.test(raw)) {
+    throw new Error(`signature must be a 65-byte hex string (got ${sigHex.length} characters)`);
+  }
+  const r = BigInt("0x" + raw.slice(0, 64));
+  const s = BigInt("0x" + raw.slice(64, 128));
+  let v = parseInt(raw.slice(128, 130), 16);
+  if (v >= 27) v -= 27;
+  if (v !== 0 && v !== 1) throw new Error(`invalid recovery id v: ${raw.slice(128, 130)} (expected 27 or 28)`);
+  if (r <= 0n || r >= N) throw new Error("r out of range [1, N-1]");
+  if (s <= 0n || s >= N) throw new Error("s out of range [1, N-1]");
+  if (s > N / 2n) throw new Error("malleable signature: s must be in lower half of curve order (EIP-2)");
+
+  const hash = personalSignHash(message);
+  const e = BigInt("0x" + hash.toString("hex"));
+
+  const x = r;
+  const y2 = mod(mod(x * mod(x * x, P), P) + 7n, P);
+  let y = modPow(y2, (P + 1n) / 4n, P);
+  if (mod(y * y, P) !== y2) throw new Error("r is not a valid point on secp256k1");
+  if ((y % 2n) !== BigInt(v)) y = P - y;
+
+  const R: AffinePoint = [x, y];
+  const sR = pointMul(s, R);
+  const negEG = pointMul(mod(N - mod(e, N), N), [Gx, Gy]);
+  const pt = pointAdd(sR, negEG);
+  const Q = pointMul(invMod(r, N), pt);
+  if (!Q) throw new Error("could not recover public key");
+  return pubkeyToAddress(Q[0], Q[1]);
+}
+
+function deterministicK(hashBuf: Buffer, privKeyBuf: Buffer): bigint {
+  let v = Buffer.alloc(32, 0x01);
+  let k = Buffer.alloc(32, 0x00);
+  k = createHmac("sha256", k).update(Buffer.concat([v, Buffer.from([0x00]), privKeyBuf, hashBuf])).digest();
+  v = createHmac("sha256", k).update(v).digest();
+  k = createHmac("sha256", k).update(Buffer.concat([v, Buffer.from([0x01]), privKeyBuf, hashBuf])).digest();
+  v = createHmac("sha256", k).update(v).digest();
+  while (true) {
+    v = createHmac("sha256", k).update(v).digest();
+    const candidate = BigInt("0x" + v.toString("hex"));
+    if (candidate >= 1n && candidate < N) return candidate;
+    k = createHmac("sha256", k).update(Buffer.concat([v, Buffer.from([0x00])])).digest();
+    v = createHmac("sha256", k).update(v).digest();
+  }
+}
+
+/**
+ * Sign a message using EIP-191 personal_sign with RFC 6979 deterministic k.
+ *
+ * Returns 65-byte hex string prefixed with 0x: 32 bytes r + 32 bytes s + 1 byte (v + 27).
+ */
+export function signPersonal(message: string | Uint8Array, privKeyHex: string): string {
+  const hash = personalSignHash(message);
+  const e = BigInt("0x" + hash.toString("hex"));
+  const rawPriv = privKeyHex.replace(/^0x/, "");
+  if (!/^[0-9a-fA-F]{64}$/.test(rawPriv)) {
+    throw new Error("private key must be a 32-byte hex string");
+  }
+  const privKeyBuf = Buffer.from(rawPriv, "hex");
+  const d = BigInt("0x" + rawPriv);
+  if (d <= 0n || d >= N) throw new Error("private key out of range [1, N-1]");
+
+  const k = deterministicK(hash, privKeyBuf);
+  const R = pointMul(k, [Gx, Gy]);
+  if (!R) throw new Error("could not generate R point");
+  const r = mod(R[0], N);
+  if (r === 0n) throw new Error("r is 0");
+  let s = mod(invMod(k, N) * mod(e + r * d, N), N);
+  if (s === 0n) throw new Error("s is 0");
+  let v = Number(R[1] % 2n);
+  if (s > N / 2n) {
+    s = N - s;
+    v = 1 - v;
+  }
+  return (
+    "0x" +
+    r.toString(16).padStart(64, "0") +
+    s.toString(16).padStart(64, "0") +
+    (v + 27).toString(16).padStart(2, "0")
+  );
+}
+
+/** Sign a canonical filing using the subject's private key. */
+export function signFiling(c: Commitment, privKeyHex: string): string {
+  return signPersonal(canonicalFiling(c), privKeyHex);
+}
+
+export interface SignatureVerification {
+  ok: boolean;
+  signer?: Address;
+  problem?: "missing_signature" | "invalid_format" | "invalid_signature" | "signer_mismatch";
+  reason?: string;
+}
+
+/**
+ * Verify a commitment's signature against its subject address.
+ */
+export function verifyFilingSignature(c: Commitment): SignatureVerification {
+  if (c.sig === undefined) {
+    return { ok: false, problem: "missing_signature", reason: "no signature provided" };
+  }
+  let signer: Address;
+  try {
+    signer = recoverPersonalSign(canonicalFiling(c), c.sig);
+  } catch (e) {
+    return { ok: false, problem: "invalid_signature", reason: (e as Error).message };
+  }
+  if (signer.toLowerCase() !== c.predicate.subject.toLowerCase()) {
+    return {
+      ok: false,
+      problem: "signer_mismatch",
+      signer,
+      reason: `signature was made by ${signer}, not subject ${c.predicate.subject}`,
+    };
+  }
+  return { ok: true, signer };
 }
