@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { evaluate } from "../src/evaluate.ts";
-import type { ChainState, Commitment, Transfer } from "../src/commitment.ts";
+import { type ChainState, type Commitment, type Transfer, ZERO_ADDRESS } from "../src/commitment.ts";
 
 const SUBJ = "0x" + "aa".repeat(20);
 const OTHER = "0x" + "11".repeat(20);
@@ -201,4 +201,107 @@ test("an unknown predicate kind is UNREADABLE, never HELD", () => {
 test("the reason distinguishes a window still running from one that closed", () => {
   assert.match(evaluate(noOut, chain(), WINDOW.from + HOUR).reason, /window open/);
   assert.match(evaluate(noOut, chain(), WINDOW.to).reason, /window closed/);
+});
+
+test("no-new-mint: BROKEN when a positive mint transfer lands in the window, with evidence attached", () => {
+  const c: Commitment = {
+    id: "c-mint-1",
+    predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN },
+    window: WINDOW,
+  };
+  const mint = xfer({ from: ZERO_ADDRESS, to: OTHER, token: TOKEN, value: "1000000" });
+  const r = evaluate(c, chain({ transfers: [mint] }), WINDOW.to);
+  assert.equal(r.verdict, "BROKEN");
+  assert.equal(r.reason, "mint transfer from zero address in window");
+  assert.equal((r.evidence as Transfer).tx, mint.tx);
+  assert.equal((r.evidence as Transfer).from, ZERO_ADDRESS);
+});
+
+test("no-new-mint: HELD when no mint occurred in window", () => {
+  const c: Commitment = {
+    id: "c-mint-2",
+    predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN },
+    window: WINDOW,
+  };
+  assert.equal(evaluate(c, chain({ transfers: [] }), WINDOW.to).verdict, "HELD");
+});
+
+test("no-new-mint: HELD when transfers in window are between normal users", () => {
+  const c: Commitment = {
+    id: "c-mint-3",
+    predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN },
+    window: WINDOW,
+  };
+  const normal = xfer({ from: SUBJ, to: OTHER, token: TOKEN, value: "500" });
+  assert.equal(evaluate(c, chain({ transfers: [normal] }), WINDOW.to).verdict, "HELD");
+});
+
+test("no-new-mint: HELD when mint occurred outside window", () => {
+  const c: Commitment = {
+    id: "c-mint-4",
+    predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN },
+    window: WINDOW,
+  };
+  const early = xfer({ from: ZERO_ADDRESS, to: OTHER, token: TOKEN, value: "100", at_time: WINDOW.from - 1 });
+  const late = xfer({ from: ZERO_ADDRESS, to: OTHER, token: TOKEN, value: "100", at_time: WINDOW.to + 1 });
+  assert.equal(evaluate(c, chain({ transfers: [early, late] }), WINDOW.to).verdict, "HELD");
+});
+
+test("no-new-mint: HELD when mint is for a different token", () => {
+  const c: Commitment = {
+    id: "c-mint-5",
+    predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN },
+    window: WINDOW,
+  };
+  const otherToken = "0x" + "ee".repeat(20);
+  const mintOther = xfer({ from: ZERO_ADDRESS, to: OTHER, token: otherToken, value: "1000" });
+  assert.equal(evaluate(c, chain({ transfers: [mintOther] }), WINDOW.to).verdict, "HELD");
+});
+
+test("no-new-mint: HELD when zero-address transfer has value 0 (a transfer of nothing is not a mint)", () => {
+  // A transfer with value "0" does not increase the token's total supply.
+  //
+  // Killing mutation: replace `cmpDec(t.value, "0") > 0` with `true`.
+  const c: Commitment = {
+    id: "c-mint-6",
+    predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN },
+    window: WINDOW,
+  };
+  const zeroTransfer = xfer({ from: ZERO_ADDRESS, to: OTHER, token: TOKEN, value: "0" });
+  assert.equal(evaluate(c, chain({ transfers: [zeroTransfer] }), WINDOW.to).verdict, "HELD");
+});
+
+test("no-new-mint: UNREADABLE when transfers state is missing", () => {
+  // Absence of a derivation is not proof of zero: a chain state where
+  // transfers were not fetched must not report HELD.
+  //
+  // Killing mutation: remove the `if (!chain.transfers)` check.
+  const c: Commitment = {
+    id: "c-mint-7",
+    predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN },
+    window: WINDOW,
+  };
+  const state = chain();
+  // Simulate missing transfers array
+  delete (state as Partial<ChainState>).transfers;
+  const r = evaluate(c, state, WINDOW.to);
+  assert.equal(r.verdict, "UNREADABLE");
+  assert.match(r.reason, /no transfers/);
+});
+
+test("no-new-mint: UNREADABLE when mint transfer value is unparseable", () => {
+  // An unparseable value cannot be verified as 0 or positive; reporting HELD
+  // would be a false all-clear, and reporting BROKEN would be an accusation
+  // without evidence.
+  //
+  // Killing mutation: remove `!isUnsignedDecimal(t.value)` check.
+  const c: Commitment = {
+    id: "c-mint-8",
+    predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN },
+    window: WINDOW,
+  };
+  const bad = xfer({ from: ZERO_ADDRESS, to: OTHER, token: TOKEN, value: "not-a-number" });
+  const r = evaluate(c, chain({ transfers: [bad] }), WINDOW.to);
+  assert.equal(r.verdict, "UNREADABLE");
+  assert.match(r.reason, /unparseable transfer value/);
 });
