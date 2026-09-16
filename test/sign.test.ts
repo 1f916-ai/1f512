@@ -7,7 +7,19 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { generateKey, headPreimage, signHead, verifyHead } from "../src/sign.ts";
+import {
+  generateKey,
+  headPreimage,
+  signHead,
+  verifyHead,
+  keccak256,
+  personalSignHash,
+  recoverPersonalSign,
+  signPersonal,
+  signFiling,
+  verifyFilingSignature,
+} from "../src/sign.ts";
+import type { Commitment } from "../src/commitment.ts";
 import { seal, type Reading, type ReadingContent } from "../src/reading.ts";
 
 const content = (over: Partial<ReadingContent> = {}): ReadingContent => ({
@@ -151,3 +163,85 @@ test("the preimage is domain-separated", async () => {
   // other structure that happens to canonicalise the same way.
   assert.match(headPreimage("abc", 1, 2), /1f512\.head\.v1/);
 });
+
+// ---------------------------------------------------------------------------
+// EIP-191 personal_sign and secp256k1 recovery tests
+// ---------------------------------------------------------------------------
+
+const ALICE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const ALICE_ADDR = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+const BOB_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const BOB_ADDR = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8";
+
+test("keccak256 matches Ethereum standard test vectors", () => {
+  assert.equal(
+    keccak256("").toString("hex"),
+    "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+  );
+  assert.equal(
+    keccak256("hello").toString("hex"),
+    "1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8",
+  );
+});
+
+test("personalSignHash prefixes message with EIP-191 standard header", () => {
+  const hash = personalSignHash("hello world");
+  // Expected: keccak256("\x19Ethereum Signed Message:\n11hello world")
+  assert.equal(
+    hash.toString("hex"),
+    "d9eba16ed0ecae432b71fe008c98cc872bb4cc214d3220a36f365326cf807d68",
+  );
+});
+
+test("recoverPersonalSign recovers the signer address from an EIP-191 signature", () => {
+  const message = "hello world";
+  const sig = signPersonal(message, ALICE_KEY);
+  const recovered = recoverPersonalSign(message, sig);
+  assert.equal(recovered, ALICE_ADDR);
+});
+
+test("recoverPersonalSign rejects a signature with mismatched v", () => {
+  const message = "hello world";
+  const sig = signPersonal(message, ALICE_KEY);
+  // Flip v (last byte 27 -> 28 or 28 -> 27)
+  const lastByte = parseInt(sig.slice(-2), 16);
+  const flippedV = (lastByte === 27 ? 28 : 27).toString(16);
+  const tamperedSig = sig.slice(0, -2) + flippedV;
+  // Recovering with flipped v gives a different address, not Alice's
+  const recovered = recoverPersonalSign(message, tamperedSig);
+  assert.notEqual(recovered, ALICE_ADDR);
+});
+
+test("recoverPersonalSign rejects a malleable signature with high s (EIP-2)", () => {
+  const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+  const message = "test high s";
+  const sig = signPersonal(message, ALICE_KEY);
+  const raw = sig.replace(/^0x/, "");
+  const s = BigInt("0x" + raw.slice(64, 128));
+  const highS = (N - s).toString(16).padStart(64, "0");
+  const malleableSig = "0x" + raw.slice(0, 64) + highS + raw.slice(128, 130);
+  assert.throws(() => recoverPersonalSign(message, malleableSig), /malleable signature/);
+});
+
+test("recoverPersonalSign rejects an r coordinate not on secp256k1 curve", () => {
+  // r = 5 has y^2 = 5^3 + 7 = 132, which is not a quadratic residue modulo P
+  const badR = "05".padStart(64, "0");
+  const validS = "01".padStart(64, "0");
+  const badSig = "0x" + badR + validS + "1b";
+  assert.throws(() => recoverPersonalSign("msg", badSig), /not a valid point/);
+});
+
+test("verifyFilingSignature reports signer mismatch machine-readably", () => {
+  const commitment: Commitment = {
+    id: "c-1",
+    predicate: { kind: "no-outbound-transfer", subject: ALICE_ADDR, token: null },
+    window: { from: 1000, to: 2000 },
+  };
+  const bobSig = signFiling(commitment, BOB_KEY);
+  const check = verifyFilingSignature({ ...commitment, sig: bobSig });
+  assert.equal(check.ok, false);
+  assert.equal(check.problem, "signer_mismatch");
+  assert.equal(check.signer, BOB_ADDR);
+  assert.match(check.reason ?? "", /not subject/);
+});
+

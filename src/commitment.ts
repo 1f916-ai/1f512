@@ -15,6 +15,9 @@
 // So `witness()` is not a test helper. It is the load-bearing method, and every
 // predicate added later has to implement it or it cannot be filed.
 
+import { canonical } from "./reading.ts";
+import { recoverPersonalSign } from "./sign.ts";
+
 export type Address = string; // 0x + 40 hex, lowercased at construction
 
 /** A concrete chain state. This is what a witness returns and what an evaluator reads. */
@@ -63,8 +66,18 @@ export interface Commitment {
   id: string;
   predicate: Predicate;
   window: Window;
-  /** Signature by the key controlling `predicate.subject`. Not verified here. */
+  /** Optional EIP-191 personal_sign signature over the canonical filing by predicate.subject. */
   sig?: string;
+}
+
+/**
+ * The canonical form of a filing to be signed.
+ *
+ * Excludes `sig` so that the preimage is stable and deterministic.
+ */
+export function canonicalFiling(c: Commitment): string {
+  const { sig: _s, ...filing } = c;
+  return canonical(filing);
 }
 
 // ---------------------------------------------------------------------------
@@ -76,13 +89,40 @@ export interface Refusal {
   reason: string;
 }
 
-export interface Filed {
+export type FilingTier = "self-signed" | "third-party";
+export type FilingProvenance = "self-signed" | "third-party";
+
+export interface SelfSignedFiled {
   filed: true;
+  tier: "self-signed";
+  provenance: "self-signed";
+  /** Address recovered from the verified signature, matching predicate.subject. */
+  signer: Address;
   /** The chain state that would break this commitment. Published with it. */
   witness: ChainState;
 }
 
+export interface ThirdPartyFiled {
+  filed: true;
+  tier: "third-party";
+  provenance: "third-party";
+  /** The chain state that would break this commitment. Published with it. */
+  witness: ChainState;
+}
+
+export type Filed = SelfSignedFiled | ThirdPartyFiled;
+
 export type FilingResult = Filed | Refusal;
+
+/**
+ * Visibly describe the filing's provenance on every surface.
+ */
+export function renderFiling(f: Filed): string {
+  if (f.tier === "self-signed") {
+    return `self-signed (verified by subject ${f.signer})`;
+  }
+  return "third-party (unverified claim)";
+}
 
 const HEX40 = /^0x[0-9a-f]{40}$/;
 
@@ -149,6 +189,28 @@ export function file(c: Commitment): FilingResult {
     if (tokErr) return { filed: false, reason: tokErr };
   }
 
+  // A signature, when present, must verify against the subject address.
+  //
+  // INVARIANTS:
+  // - A verified signature proves authorship, never that the promise will be kept.
+  // - An unsigned filing is still a valid third-party claim; a missing signature is
+  //   never absence of a claim.
+  // - A filing with a valid signature that recovers to a DIFFERENT address must be refused.
+  if (c.sig !== undefined) {
+    let recovered: Address;
+    try {
+      recovered = recoverPersonalSign(canonicalFiling(c), c.sig);
+    } catch (e) {
+      return { filed: false, reason: `signature is invalid: ${(e as Error).message}` };
+    }
+    if (recovered.toLowerCase() !== p.subject.toLowerCase()) {
+      return {
+        filed: false,
+        reason: `signature was made by ${recovered}, not subject ${p.subject}`,
+      };
+    }
+  }
+
   // The witness is dated INSIDE the window on purpose. A break that falls
   // outside the window is not a break of this commitment, so a witness outside
   // it would not demonstrate what it claims to.
@@ -156,20 +218,35 @@ export function file(c: Commitment): FilingResult {
   const at_block = 1;
   const other: Address = "0x" + "11".repeat(20);
 
+  const filed = (witness: ChainState): Filed => {
+    if (c.sig !== undefined) {
+      return {
+        filed: true,
+        tier: "self-signed",
+        provenance: "self-signed",
+        signer: p.subject,
+        witness,
+      };
+    }
+    return {
+      filed: true,
+      tier: "third-party",
+      provenance: "third-party",
+      witness,
+    };
+  };
+
   switch (p.kind) {
     case "no-outbound-transfer": {
       // Always breakable: any outbound transfer in the window does it.
-      return {
-        filed: true,
-        witness: {
-          at_block,
-          at_time,
-          balances: {},
-          transfers: [
-            { tx: "0x" + "22".repeat(32), from: p.subject, to: other, token: p.token, value: "1", at_block, at_time },
-          ],
-        },
-      };
+      return filed({
+        at_block,
+        at_time,
+        balances: {},
+        transfers: [
+          { tx: "0x" + "22".repeat(32), from: p.subject, to: other, token: p.token, value: "1", at_block, at_time },
+        ],
+      });
     }
 
     case "balance-floor": {
@@ -190,7 +267,7 @@ export function file(c: Commitment): FilingResult {
             "This commitment would always read HELD. Raise the floor to an amount you would actually be embarrassed to fall below.",
         };
       }
-      return { filed: true, witness: { at_block, at_time, balances: { [p.subject]: below }, transfers: [] } };
+      return filed({ at_block, at_time, balances: { [p.subject]: below }, transfers: [] });
     }
 
     case "only-to": {
@@ -210,17 +287,14 @@ export function file(c: Commitment): FilingResult {
         n++;
         candidate = "0x" + n.toString(16).padStart(40, "0");
       }
-      return {
-        filed: true,
-        witness: {
-          at_block,
-          at_time,
-          balances: {},
-          transfers: [
-            { tx: "0x" + "33".repeat(32), from: p.subject, to: candidate, token: p.token, value: "1", at_block, at_time },
-          ],
-        },
-      };
+      return filed({
+        at_block,
+        at_time,
+        balances: {},
+        transfers: [
+          { tx: "0x" + "33".repeat(32), from: p.subject, to: candidate, token: p.token, value: "1", at_block, at_time },
+        ],
+      });
     }
 
     case "disclosed-within": {
@@ -240,18 +314,15 @@ export function file(c: Commitment): FilingResult {
       }
       // Witness: an outflow, and no disclosure, at a time past the deadline.
       const outAt = c.window.from;
-      return {
-        filed: true,
-        witness: {
-          at_block,
-          at_time: outAt + p.hours * 3_600_000 + 1,
-          balances: {},
-          disclosures: {},
-          transfers: [
-            { tx: "0x" + "44".repeat(32), from: p.subject, to: other, token: p.token, value: "1", at_block, at_time: outAt },
-          ],
-        },
-      };
+      return filed({
+        at_block,
+        at_time: outAt + p.hours * 3_600_000 + 1,
+        balances: {},
+        disclosures: {},
+        transfers: [
+          { tx: "0x" + "44".repeat(32), from: p.subject, to: other, token: p.token, value: "1", at_block, at_time: outAt },
+        ],
+      });
     }
   }
 
