@@ -7,7 +7,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { file, cmpDec, isUnsignedDecimal, type Commitment } from "../src/commitment.ts";
+import { file, cmpDec, isUnsignedDecimal, ZERO_ADDRESS, type Commitment } from "../src/commitment.ts";
+import { evaluate } from "../src/evaluate.ts";
 
 const SUBJ = "0x" + "aa".repeat(20);
 const TOKEN = "0x" + "bb".repeat(20);
@@ -133,4 +134,52 @@ test("decimal comparison orders by magnitude, not lexically", () => {
   assert.equal(cmpDec("1000", "999"), 1);
   assert.equal(cmpDec("42", "42"), 0);
   assert.equal(isUnsignedDecimal("007"), false, "leading zeros are not a canonical decimal");
+});
+
+test("no-new-mint files WITH a witness showing a mint from the zero address", () => {
+  // A commitment that no new tokens are minted must produce a chain state where
+  // a mint actually happens.
+  //
+  // Killing mutation: return { filed: true } with transfers: [] from the
+  // no-new-mint branch.
+  const r = file(c({ predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN } }));
+  assert.equal(r.filed, true);
+  assert.ok(r.filed && r.witness.transfers.length === 1, "the witness names a concrete mint transfer");
+  assert.equal(r.filed && r.witness.transfers[0]!.from, ZERO_ADDRESS);
+  assert.equal(r.filed && r.witness.transfers[0]!.token, TOKEN);
+  assert.equal(r.filed && r.witness.transfers[0]!.value, "1");
+});
+
+test("no-new-mint witness is dated INSIDE the window", () => {
+  // A mint outside the window is not a break of this commitment.
+  const r = file(c({ predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN } }));
+  assert.ok(r.filed);
+  const t = r.filed ? r.witness.transfers[0]!.at_time : 0;
+  assert.ok(t >= WINDOW.from && t < WINDOW.to, `witness at ${t} is inside [${WINDOW.from}, ${WINDOW.to})`);
+});
+
+test("no-new-mint refuses null token (native asset has no ERC-20 mint events)", () => {
+  // The chain's native asset (ETH on Base) does not mint via ERC-20 Transfer
+  // events from the zero address. "I promise no new native asset mints" would
+  // report HELD forever because no ERC-20 log can ever break it.
+  //
+  // Killing mutation: delete the `p.token === null` refusal.
+  const r = file(c({ predicate: { kind: "no-new-mint", subject: SUBJ, token: null as never } }));
+  assert.equal(r.filed, false);
+  assert.match(r.filed === false ? r.reason : "", /requires an ERC-20 token address/);
+});
+
+test("no-new-mint refuses zero address as token", () => {
+  const r = file(c({ predicate: { kind: "no-new-mint", subject: SUBJ, token: ZERO_ADDRESS } }));
+  assert.equal(r.filed, false);
+  assert.match(r.filed === false ? r.reason : "", /token address cannot be the zero address/);
+});
+
+test("no-new-mint witness breaks its own predicate under evaluate", () => {
+  const comm = c({ predicate: { kind: "no-new-mint", subject: SUBJ, token: TOKEN } });
+  const r = file(comm);
+  assert.ok(r.filed);
+  const ev = evaluate(comm, r.witness, WINDOW.to);
+  assert.equal(ev.verdict, "BROKEN");
+  assert.equal(ev.reason, "mint transfer from zero address in window");
 });

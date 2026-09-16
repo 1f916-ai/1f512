@@ -18,7 +18,7 @@
 // it, a test supplies it, and the answer is the same either way.
 
 import type { ChainState, Commitment, Transfer } from "./commitment.ts";
-import { cmpDec } from "./commitment.ts";
+import { cmpDec, isUnsignedDecimal, ZERO_ADDRESS } from "./commitment.ts";
 import type { Verdict } from "./reading.ts";
 
 export interface Evaluation {
@@ -110,6 +110,24 @@ export function evaluate(c: Commitment, chain: ChainState, T: number): Evaluatio
         }
       }
       return heldOrOpen(c, T, outflows.length ? "every outflow disclosed, or still inside its window" : "no outflow to disclose");
+    }
+
+    case "no-new-mint": {
+      if (!chain.transfers) {
+        return { verdict: "UNREADABLE", reason: "no transfers in this chain state" };
+      }
+      for (const t of chain.transfers) {
+        if (t.token !== p.token || t.from !== ZERO_ADDRESS || !inWindow(t.at_time, c)) {
+          continue;
+        }
+        if (!isUnsignedDecimal(t.value)) {
+          return { verdict: "UNREADABLE", reason: `unparseable transfer value ${JSON.stringify(t.value)}` };
+        }
+        if (cmpDec(t.value, "0") > 0) {
+          return { verdict: "BROKEN", reason: "mint transfer from zero address in window", evidence: t };
+        }
+      }
+      return heldOrOpen(c, T, "no mint transfer seen in window");
     }
   }
 

@@ -49,15 +49,14 @@ export interface Window {
   to: number;
 }
 
-// ---------------------------------------------------------------------------
-// Predicates
-// ---------------------------------------------------------------------------
+export const ZERO_ADDRESS: Address = "0x" + "00".repeat(20);
 
 export type Predicate =
   | { kind: "no-outbound-transfer"; subject: Address; token: Address | null }
   | { kind: "balance-floor"; subject: Address; token: Address | null; floor: string }
   | { kind: "only-to"; subject: Address; token: Address | null; allowed: Address[] }
-  | { kind: "disclosed-within"; subject: Address; token: Address | null; hours: number };
+  | { kind: "disclosed-within"; subject: Address; token: Address | null; hours: number }
+  | { kind: "no-new-mint"; subject: Address; token: Address };
 
 export interface Commitment {
   id: string;
@@ -249,6 +248,38 @@ export function file(c: Commitment): FilingResult {
           disclosures: {},
           transfers: [
             { tx: "0x" + "44".repeat(32), from: p.subject, to: other, token: p.token, value: "1", at_block, at_time: outAt },
+          ],
+        },
+      };
+    }
+
+    case "no-new-mint": {
+      if (p.token === null) {
+        return {
+          filed: false,
+          reason: "no-new-mint requires an ERC-20 token address; native asset minting is not tracked via ERC-20 Transfer events",
+        };
+      }
+      if (p.token === ZERO_ADDRESS) {
+        return { filed: false, reason: "token address cannot be the zero address" };
+      }
+      // Witness: a mint transfer from the zero address inside the window.
+      return {
+        filed: true,
+        witness: {
+          at_block,
+          at_time,
+          balances: {},
+          transfers: [
+            {
+              tx: "0x" + "55".repeat(32),
+              from: ZERO_ADDRESS,
+              to: other,
+              token: p.token,
+              value: "1",
+              at_block,
+              at_time,
+            },
           ],
         },
       };
