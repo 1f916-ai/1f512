@@ -9,6 +9,7 @@
     "test": "node --experimental-strip-types --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "demo": "node --experimental-strip-types examples/demo.ts",
-    "live": "node --experimental-strip-types examples/live.ts"
+    "live": "node --experimental-strip-types examples/live.ts",
+    "page": "node --experimental-strip-types examples/page.ts"
   }
 }

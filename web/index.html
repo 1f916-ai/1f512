@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>1F512 — Public Log Reading</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --surface: #181b20;
+      --surface-border: #2c323b;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --code-bg: #1e2229;
+      --code-border: #333a46;
+      --accent: #3b82f6;
+
+      /* Verdict palette: bold, high-contrast, unmuted */
+      --verdict-held-bg: #064e3b;
+      --verdict-held-border: #059669;
+      --verdict-held-text: #ecfdf5;
+
+      --verdict-broken-bg: #7f1d1d;
+      --verdict-broken-border: #dc2626;
+      --verdict-broken-text: #fef2f2;
+
+      --verdict-unreadable-bg: #78350f;
+      --verdict-unreadable-border: #d97706;
+      --verdict-unreadable-text: #fffbeb;
+
+      --verdict-defaulted-bg: #581c87;
+      --verdict-defaulted-border: #9333ea;
+      --verdict-defaulted-text: #faf5ff;
+
+      --tier-bg: #1e293b;
+      --tier-border: #475569;
+      --tier-text: #cbd5e1;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      line-height: 1.5;
+      padding: 2rem 1rem;
+    }
+
+    .page-wrapper {
+      max-width: 1040px;
+      margin: 0 auto;
+    }
+
+    .page-header {
+      border-bottom: 2px solid var(--surface-border);
+      padding-bottom: 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .page-header h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #fff;
+      margin-bottom: 0.5rem;
+    }
+
+    .page-header .subtitle {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .philosophy-banner {
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
+      border-left: 4px solid var(--accent);
+      padding: 0.75rem 1rem;
+      font-size: 0.85rem;
+      color: var(--text);
+      margin-bottom: 1.5rem;
+    }
+
+    .philosophy-banner p { margin: 0.25rem 0; }
+    .philosophy-banner strong { color: #fff; }
+
+    /* Controls Toolbar */
+    .controls-panel {
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
+      border-radius: 4px;
+      padding: 1rem;
+      margin-bottom: 2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .controls-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+
+    .btn-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    button, .file-label {
+      background: var(--code-bg);
+      border: 1px solid var(--code-border);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.85rem;
+      padding: 0.4rem 0.85rem;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+
+    button:hover, .file-label:hover {
+      background: #282f3a;
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    button.btn-primary {
+      background: #1e3a8a;
+      border-color: #3b82f6;
+      color: #eff6ff;
+      font-weight: 700;
+    }
+
+    button.btn-primary:hover {
+      background: #2563eb;
+    }
+
+    input[type="file"] {
+      display: none;
+    }
+
+    .time-control {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      flex-wrap: wrap;
+    }
+
+    .time-control input {
+      background: var(--code-bg);
+      border: 1px solid var(--code-border);
+      color: #67e8f9;
+      font-family: inherit;
+      padding: 0.35rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      width: 200px;
+    }
+
+    .verification-status {
+      padding: 0.6rem 0.85rem;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      border: 1px solid;
+      display: none;
+    }
+
+    .verification-status.status-ok {
+      display: block;
+      background: #064e3b33;
+      border-color: var(--verdict-held-border);
+      color: var(--verdict-held-text);
+    }
+
+    .verification-status.status-error {
+      display: block;
+      background: #7f1d1d33;
+      border-color: var(--verdict-broken-border);
+      color: var(--verdict-broken-text);
+    }
+
+    /* Paste Area */
+    .paste-box {
+      display: none;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+
+    .paste-box.active {
+      display: flex;
+    }
+
+    textarea.paste-area {
+      background: #111418;
+      border: 1px solid var(--code-border);
+      border-radius: 4px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.8rem;
+      padding: 0.75rem;
+      min-height: 120px;
+      resize: vertical;
+    }
+
+    /* Drop Zone */
+    .dropzone {
+      border: 2px dashed var(--surface-border);
+      border-radius: 4px;
+      padding: 1.25rem;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+
+    .dropzone.dragover {
+      border-color: var(--accent);
+      background: rgba(59, 130, 246, 0.05);
+      color: #fff;
+    }
+
+    /* Readings Container */
+    .readings-container {
+      display: flex;
+      flex-direction: column;
+      gap: 2rem;
+    }
+
+    .reading-card {
+      background: var(--surface);
+      border: 2px solid var(--surface-border);
+      border-radius: 4px;
+      padding: 1.5rem;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+    }
+
+    .reading-card-held { border-color: var(--verdict-held-border); }
+    .reading-card-broken { border-color: var(--verdict-broken-border); }
+    .reading-card-unreadable { border-color: var(--verdict-unreadable-border); }
+    .reading-card-defaulted { border-color: var(--verdict-defaulted-border); }
+
+    /* The First Line: Verdict and Tier, Monitored, never called enforced */
+    .first-line {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .verdict {
+      font-size: 1.5rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      padding: 0.25rem 0.85rem;
+      border-radius: 4px;
+      border: 2px solid;
+      text-transform: uppercase;
+    }
+
+    .verdict-held {
+      background: var(--verdict-held-bg);
+      border-color: var(--verdict-held-border);
+      color: var(--verdict-held-text);
+    }
+
+    .verdict-broken {
+      background: var(--verdict-broken-bg);
+      border-color: var(--verdict-broken-border);
+      color: var(--verdict-broken-text);
+    }
+
+    .verdict-unreadable {
+      background: var(--verdict-unreadable-bg);
+      border-color: var(--verdict-unreadable-border);
+      color: var(--verdict-unreadable-text);
+    }
+
+    .verdict-defaulted {
+      background: var(--verdict-defaulted-bg);
+      border-color: var(--verdict-defaulted-border);
+      color: var(--verdict-defaulted-text);
+    }
+
+    .tier {
+      font-size: 0.9rem;
+      font-weight: 700;
+      padding: 0.35rem 0.75rem;
+      border-radius: 4px;
+      background: var(--tier-bg);
+      border: 1px solid var(--tier-border);
+      color: var(--tier-text);
+      letter-spacing: 0.03em;
+    }
+
+    .reading-meta {
+      font-size: 0.88rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      margin-bottom: 1rem;
+      border-bottom: 1px solid var(--surface-border);
+      padding-bottom: 1rem;
+    }
+
+    .meta-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .meta-label { color: var(--text-muted); }
+
+    /* Verdict Callouts: equal prominent weight for bad states */
+    .verdict-callout {
+      padding: 0.85rem 1rem;
+      border-radius: 4px;
+      margin-bottom: 1.25rem;
+      font-size: 0.9rem;
+      border-left: 4px solid;
+    }
+
+    .callout-held {
+      background: #064e3b33;
+      border-color: var(--verdict-held-border);
+      color: var(--verdict-held-text);
+    }
+
+    .callout-broken {
+      background: #7f1d1d33;
+      border-color: var(--verdict-broken-border);
+      color: var(--verdict-broken-text);
+    }
+
+    .callout-unreadable {
+      background: #78350f33;
+      border-color: var(--verdict-unreadable-border);
+      color: var(--verdict-unreadable-text);
+    }
+
+    .callout-defaulted {
+      background: #581c8733;
+      border-color: var(--verdict-defaulted-border);
+      color: var(--verdict-defaulted-text);
+    }
+
+    .callout-badge { text-transform: uppercase; margin-right: 0.4rem; }
+    .callout-note { margin-top: 0.5rem; font-size: 0.85rem; }
+
+    /* Window Section */
+    .section-window {
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--surface-border);
+      padding-bottom: 1rem;
+    }
+
+    .section-subtitle {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    .window-evaluation {
+      background: var(--code-bg);
+      border: 1px solid var(--code-border);
+      border-radius: 4px;
+      padding: 0.75rem 1rem;
+      font-size: 0.85rem;
+    }
+
+    .window-status-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+      flex-wrap: wrap;
+    }
+
+    .window-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .window-indicator-open { background: #10b981; box-shadow: 0 0 6px #10b981; }
+    .window-indicator-closed { background: #94a3b8; }
+    .window-indicator-not_started { background: #f59e0b; }
+
+    .window-bounds-row {
+      color: var(--text-muted);
+      font-size: 0.8rem;
+    }
+
+    /* Hash Chain Section */
+    .section-chain {
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--surface-border);
+      padding-bottom: 1rem;
+    }
+
+    .chain-box {
+      background: var(--code-bg);
+      border: 1px solid var(--code-border);
+      border-radius: 4px;
+      padding: 0.75rem 1rem;
+      font-size: 0.85rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .chain-step {
+      display: flex;
+      gap: 0.5rem;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+
+    .chain-link-arrow {
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      padding-left: 1rem;
+    }
+
+    .chain-hash, .chain-sig {
+      font-family: inherit;
+      color: #67e8f9;
+      word-break: break-all;
+    }
+
+    /* RPC Reading Inputs Section */
+    .section-rpc {
+      margin-top: 1rem;
+    }
+
+    .rpc-cards-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+
+    @media (min-width: 768px) {
+      .rpc-cards-grid {
+        grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      }
+    }
+
+    .rpc-exchange-card {
+      background: var(--code-bg);
+      border: 1px solid var(--code-border);
+      border-radius: 4px;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .rpc-exchange-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--code-border);
+      padding-bottom: 0.5rem;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .rpc-provider { color: #facc15; font-size: 0.95rem; }
+    .rpc-block { color: #38bdf8; font-weight: 700; }
+    .rpc-method { color: #a78bfa; font-weight: 700; }
+
+    .rpc-label-title {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      margin-bottom: 0.25rem;
+    }
+
+    pre.rpc-params, pre.rpc-result {
+      background: #111418;
+      border: 1px solid #232832;
+      border-radius: 3px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8rem;
+      overflow-x: auto;
+      max-height: 280px;
+      color: #f1f5f9;
+      line-height: 1.4;
+    }
+
+    code {
+      font-family: inherit;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 0.1em 0.3em;
+      border-radius: 3px;
+    }
+
+    .empty-log-notice {
+      text-align: center;
+      padding: 3rem 1rem;
+      background: var(--surface);
+      border: 1px dashed var(--surface-border);
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="page-wrapper">
+    <header class="page-header">
+      <h1>1F512 — Public Log Reading</h1>
+      <div class="subtitle">Falsifiable locks — catch breaks and silence without trusting a status page</div>
+      <div class="philosophy-banner">
+        <p><strong>Render the log, never a second source of truth:</strong> This page renders published append-only JSONL readings. A stranger with an RPC recomputes every verdict byte-for-byte.</p>
+        <p><strong>Two tiers, never conflated:</strong> <em>Monitored:</em> the subject is a key, nothing stops it, and the registry guarantees only that breaks and silence are caught and published. Calling a monitored position &ldquo;locked&rdquo; or &ldquo;enforced&rdquo; is the lie this project exists to end.</p>
+        <p>Zero external CDNs. No wallet connect. No logins. No cookies.</p>
+      </div>
+    </header>
+
+    <div class="controls-panel">
+      <div class="controls-row">
+        <div class="btn-group">
+          <button type="button" id="btn-demo" class="btn-primary">Load Demo Log</button>
+          <label class="file-label">
+            Select readings.jsonl
+            <input type="file" id="file-input" accept=".jsonl,.txt,application/json">
+          </label>
+          <button type="button" id="btn-toggle-paste">Paste JSONL</button>
+          <button type="button" id="btn-fetch">Fetch readings.jsonl</button>
+        </div>
+        <div class="btn-group">
+          <button type="button" id="btn-verify" class="btn-primary">&#10003; Verify Hash Chain (Web Crypto)</button>
+        </div>
+      </div>
+
+      <div class="controls-row">
+        <div class="time-control">
+          <span>Clock timestamp T (ms):</span>
+          <input type="number" id="input-t" step="1000">
+          <button type="button" id="btn-now">Reset to Now</button>
+          <span id="label-iso" style="color: var(--text-muted); font-size: 0.8rem;"></span>
+        </div>
+      </div>
+
+      <div id="dropzone" class="dropzone">
+        Drag & drop any <code>readings.jsonl</code> file here to render instantly
+      </div>
+
+      <div id="paste-box" class="paste-box">
+        <textarea id="paste-text" class="paste-area" placeholder="Paste append-only JSONL readings here..."></textarea>
+        <div style="display: flex; gap: 0.5rem;">
+          <button type="button" id="btn-apply-paste" class="btn-primary">Render Pasted Log</button>
+          <button type="button" id="btn-clear-paste">Clear</button>
+        </div>
+      </div>
+
+      <div id="verification-box" class="verification-status"></div>
+    </div>
+
+    <main id="log-output">
+      <!-- Rendered readings will appear here -->
+    </main>
+  </div>
+
+  <script>
+    const DEMO_LOG = "{\"commitment\":\"base-usdc-vault-q1\",\"verdict\":\"HELD\",\"reason\":\"no outbound transfer seen in window; window open\",\"rpc\":[{\"provider\":\"base-official\",\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"0x30f0000\",\"toBlock\":\"0x30f0010\",\"address\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\"}],\"result\":[],\"at_block\":51321789},{\"provider\":\"publicnode\",\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"0x30f0000\",\"toBlock\":\"0x30f0010\",\"address\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\"}],\"result\":[],\"at_block\":51321789}],\"read_at\":1700000000000,\"prev_hash\":\"\",\"hash\":\"3cc0671d21fa78acb9dfe2bed4b1b78d3b40ea9d4f1f61a6bc32ba69619c4b30\"}\n{\"commitment\":\"base-usdc-vault-q1\",\"verdict\":\"UNREADABLE\",\"reason\":\"one_failed: second provider returned HTTP error\",\"rpc\":[{\"provider\":\"base-official\",\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"0x30f0011\",\"toBlock\":\"0x30f0020\",\"address\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\"}],\"result\":[],\"at_block\":51321800}],\"read_at\":1700086400000,\"note\":\"publicnode: http 413 block range exceeds free ceiling\",\"prev_hash\":\"3cc0671d21fa78acb9dfe2bed4b1b78d3b40ea9d4f1f61a6bc32ba69619c4b30\",\"hash\":\"c6cdd0fcf489226bb6c9a95d886eeae1723f9879048edbaac6c6bcbd06eae0e1\"}\n{\"commitment\":\"base-usdc-vault-q1\",\"verdict\":\"BROKEN\",\"reason\":\"outbound transfer in window\",\"rpc\":[{\"provider\":\"base-official\",\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"0x30f0021\",\"toBlock\":\"0x30f0030\",\"address\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\"}],\"result\":[{\"tx\":\"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef\",\"from\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"to\":\"0x9999999999999999999999999999999999999999\",\"value\":\"5000000\"}],\"at_block\":51321820},{\"provider\":\"publicnode\",\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"0x30f0021\",\"toBlock\":\"0x30f0030\",\"address\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\"}],\"result\":[{\"tx\":\"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef\",\"from\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"to\":\"0x9999999999999999999999999999999999999999\",\"value\":\"5000000\"}],\"at_block\":51321820}],\"read_at\":1700172800000,\"prev_hash\":\"c6cdd0fcf489226bb6c9a95d886eeae1723f9879048edbaac6c6bcbd06eae0e1\",\"hash\":\"8e0668c1962ce87f6e306686ebb434c53165c2ec6b75f1f78640e6b40558dba2\"}\n{\"commitment\":\"treasury-disclosure-q1\",\"verdict\":\"DEFAULTED\",\"reason\":\"outflow never disclosed within the window\",\"rpc\":[{\"provider\":\"base-official\",\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"0x30f0031\",\"toBlock\":\"0x30f0040\",\"address\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\"}],\"result\":[],\"at_block\":51321840},{\"provider\":\"publicnode\",\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"0x30f0031\",\"toBlock\":\"0x30f0040\",\"address\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\"}],\"result\":[],\"at_block\":51321840}],\"read_at\":1700259200000,\"note\":\"deadline expired at T with no cryptographic disclosure filed\",\"prev_hash\":\"8e0668c1962ce87f6e306686ebb434c53165c2ec6b75f1f78640e6b40558dba2\",\"hash\":\"41ed9c782c2ac4fe14fd43e65aa83b0277311b8be9dae124ce5af3c87a93f63a\"}\n";
+    let currentLogText = DEMO_LOG;
+    let currentT = Date.now();
+
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function canonical(value) {
+      if (value === null) return "null";
+      if (typeof value === "boolean") return value ? "true" : "false";
+      if (typeof value === "string") return JSON.stringify(value);
+      if (typeof value === "number") {
+        if (!Number.isFinite(value)) throw new Error("cannot canonicalise non-finite number " + value);
+        if (!Number.isSafeInteger(value)) throw new Error("cannot canonicalise unsafe integer " + value);
+        return String(value);
+      }
+      if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+      if (typeof value === "object") {
+        const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+        return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonical(value[k])).join(",") + "}";
+      }
+      throw new Error("cannot canonicalise " + typeof value);
+    }
+
+    async function sha256Hex(s) {
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+      return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    function preimage(content, prevHash) {
+      return canonical({ ...content, prev_hash: prevHash });
+    }
+
+    function parseLog(text) {
+      const readings = [];
+      const rejected = [];
+      if (!text || text.trim() === "") return { readings, rejected };
+
+      const parts = text.split("\n");
+      const trailing = parts.pop();
+      if (trailing !== "") {
+        rejected.push({
+          lineNumber: parts.length + 1,
+          raw: (trailing || "").slice(0, 200),
+          problem: "truncated final line: the append did not complete",
+        });
+      }
+
+      parts.forEach((raw, i) => {
+        if (raw === "") return;
+        try {
+          readings.push(JSON.parse(raw));
+        } catch (e) {
+          rejected.push({
+            lineNumber: i + 1,
+            raw: raw.slice(0, 200),
+            problem: "unparseable: " + String(e).slice(0, 120),
+          });
+        }
+      });
+
+      return { readings, rejected };
+    }
+
+    function renderFirstLine(verdict) {
+      return [
+        '<div class="first-line">',
+        '  <span class="verdict verdict-' + verdict.toLowerCase() + '">' + escapeHtml(verdict) + '</span>',
+        '  <span class="tier tier-monitored">Tier: Monitored</span>',
+        '</div>'
+      ].join("\n");
+    }
+
+    function renderReadingCard(reading, T) {
+      const verdict = reading.verdict;
+      const firstLine = renderFirstLine(verdict);
+      const readDate = new Date(reading.read_at).toISOString();
+
+      let calloutHtml = "";
+      if (verdict === "UNREADABLE") {
+        calloutHtml = [
+          '<div class="verdict-callout callout-unreadable" role="alert">',
+          '  <strong class="callout-badge">UNREADABLE:</strong> The chain could not be read reliably or providers disagreed. This is a first-class verdict, never smoothed to HELD.',
+          reading.note ? '  <div class="callout-note">Note: <code>' + escapeHtml(reading.note) + '</code></div>' : '',
+          '</div>'
+        ].filter(Boolean).join("\n");
+      } else if (verdict === "DEFAULTED") {
+        calloutHtml = [
+          '<div class="verdict-callout callout-defaulted" role="alert">',
+          '  <strong class="callout-badge">DEFAULTED:</strong> The commitment window closed or elapsed without required disclosures or actions. Silence from the watcher is never reassurance.',
+          reading.note ? '  <div class="callout-note">Note: <code>' + escapeHtml(reading.note) + '</code></div>' : '',
+          '</div>'
+        ].filter(Boolean).join("\n");
+      } else if (verdict === "BROKEN") {
+        calloutHtml = [
+          '<div class="verdict-callout callout-broken" role="alert">',
+          '  <strong class="callout-badge">BROKEN:</strong> Chain state observed during this reading broke the commitment predicate.',
+          reading.note ? '  <div class="callout-note">Note: <code>' + escapeHtml(reading.note) + '</code></div>' : '',
+          '</div>'
+        ].filter(Boolean).join("\n");
+      } else if (verdict === "HELD") {
+        calloutHtml = [
+          '<div class="verdict-callout callout-held">',
+          '  <strong class="callout-badge">HELD:</strong> Chain state verified against the commitment predicate at this reading.',
+          '</div>'
+        ].join("\n");
+      }
+
+      // Inferred or evaluated window
+      const isWindowOpen = (reading.reason || "").includes("window open");
+      const isWindowClosed = (reading.reason || "").includes("window closed");
+      let windowHtml = "";
+      if (isWindowOpen || isWindowClosed) {
+        const open = isWindowOpen;
+        windowHtml = [
+          '<section class="section-window section-window-inferred">',
+          '  <h4 class="section-subtitle">Commitment Window</h4>',
+          '  <div class="window-evaluation window-evaluation-' + (open ? 'open' : 'closed') + '">',
+          '    <div class="window-status-row">',
+          '      <span class="window-indicator window-indicator-' + (open ? 'open' : 'closed') + '"></span>',
+          '      <span class="window-status-text">Status at T (' + new Date(T).toISOString() + '): <strong>' + escapeHtml(reading.reason) + '</strong></span>',
+          '      <span class="window-open-flag">(Open: <code>' + open + '</code>)</span>',
+          '    </div>',
+          '  </div>',
+          '</section>'
+        ].join("\n");
+      }
+
+      // Hash chain
+      const hashChainHtml = [
+        '<section class="section-chain">',
+        '  <h4 class="section-subtitle">Hash Chain (append-only proof)</h4>',
+        '  <div class="chain-box">',
+        '    <div class="chain-step">',
+        '      <span class="meta-label">Previous Line Hash:</span>',
+        '      <code class="chain-hash prev-hash">' + escapeHtml(reading.prev_hash || "(genesis)") + '</code>',
+        '    </div>',
+        '    <div class="chain-link-arrow">&darr; <span>chained by sha256</span></div>',
+        '    <div class="chain-step">',
+        '      <span class="meta-label">Current Line Hash:</span>',
+        '      <code class="chain-hash current-hash">' + escapeHtml(reading.hash) + '</code>',
+        '    </div>',
+        reading.sig ? [
+          '    <div class="chain-step chain-step-sig">',
+          '      <span class="meta-label">Signature:</span>',
+          '      <code class="chain-sig">' + escapeHtml(reading.sig) + '</code>',
+          reading.key ? '      <span class="chain-key">(Key: <code>' + escapeHtml(reading.key) + '</code>)</span>' : '',
+          '    </div>'
+        ].filter(Boolean).join("\n") : '',
+        '  </div>',
+        '</section>'
+      ].filter(Boolean).join("\n");
+
+      // RPC Exchanges
+      let rpcHtml = "";
+      if (reading.rpc && reading.rpc.length > 0) {
+        const exchangeCards = reading.rpc.map((exchange) => {
+          return [
+            '<div class="rpc-exchange-card" data-provider="' + escapeHtml(exchange.provider) + '">',
+            '  <div class="rpc-exchange-header">',
+            '    <div class="rpc-provider-box">',
+            '      <span class="meta-label">Provider:</span>',
+            '      <strong class="rpc-provider">' + escapeHtml(exchange.provider) + '</strong>',
+            '    </div>',
+            '    <div class="rpc-block-box">',
+            '      <span class="meta-label">Pinned Block:</span>',
+            '      <code class="rpc-block">' + escapeHtml(String(exchange.at_block)) + '</code>',
+            '    </div>',
+            '  </div>',
+            '  <div class="rpc-method-row">',
+            '    <span class="meta-label">RPC Method:</span>',
+            '    <code class="rpc-method">' + escapeHtml(exchange.method) + '</code>',
+            '  </div>',
+            '  <div class="rpc-detail-row">',
+            '    <div class="rpc-label-title">Params:</div>',
+            '    <pre class="rpc-params"><code>' + escapeHtml(JSON.stringify(exchange.params, null, 2)) + '</code></pre>',
+            '  </div>',
+            '  <div class="rpc-detail-row">',
+            '    <div class="rpc-label-title">Result:</div>',
+            '    <pre class="rpc-result"><code>' + escapeHtml(JSON.stringify(exchange.result, null, 2)) + '</code></pre>',
+            '  </div>',
+            '</div>'
+          ].join("\n");
+        }).join("\n");
+
+        rpcHtml = [
+          '<section class="section-rpc">',
+          '  <h4 class="section-subtitle">RPC Reading Inputs (' + reading.rpc.length + ' provider' + (reading.rpc.length === 1 ? '' : 's') + ')</h4>',
+          '  <div class="rpc-cards-grid">',
+          exchangeCards,
+          '  </div>',
+          '</section>'
+        ].join("\n");
+      } else {
+        rpcHtml = [
+          '<section class="section-rpc section-rpc-empty">',
+          '  <h4 class="section-subtitle">RPC Reading Inputs (0 providers)</h4>',
+          '  <div class="rpc-empty-notice">',
+          '    <em>No RPC provider responses recorded. Providers were unreachable or failed before response.</em>',
+          reading.note ? '    <div class="rpc-error-detail">Error: <code>' + escapeHtml(reading.note) + '</code></div>' : '',
+          '  </div>',
+          '</section>'
+        ].join("\n");
+      }
+
+      return [
+        '<article class="reading-card reading-card-' + verdict.toLowerCase() + '" data-verdict="' + escapeHtml(verdict) + '" data-commitment="' + escapeHtml(reading.commitment) + '">',
+        '  <header class="reading-card-header">',
+        firstLine,
+        '    <div class="reading-meta">',
+        '      <div class="meta-row"><span class="meta-label">Commitment ID:</span> <code class="commitment-id">' + escapeHtml(reading.commitment) + '</code></div>',
+        '      <div class="meta-row"><span class="meta-label">Read At:</span> <time class="read-at" datetime="' + readDate + '">' + readDate + ' (' + reading.read_at + ')</time></div>',
+        '      <div class="meta-row"><span class="meta-label">Reason:</span> <span class="verdict-reason">' + escapeHtml(reading.reason) + '</span></div>',
+        '    </div>',
+        '  </header>',
+        calloutHtml,
+        windowHtml,
+        hashChainHtml,
+        rpcHtml,
+        '</article>'
+      ].filter(Boolean).join("\n");
+    }
+
+    function renderLog(jsonl, T) {
+      const container = document.getElementById("log-output");
+      const { readings, rejected } = parseLog(jsonl);
+
+      if (readings.length === 0 && rejected.length === 0) {
+        container.innerHTML = '<div class="empty-log-notice"><h3>Log is empty</h3><p>No readings recorded yet.</p></div>';
+        return;
+      }
+
+      let rejectedHtml = "";
+      if (rejected.length > 0) {
+        rejectedHtml = [
+          '<div class="verdict-callout callout-unreadable" style="margin-bottom: 1.5rem;" role="alert">',
+          '  <strong>Rejected Log Lines (' + rejected.length + '):</strong>',
+          '  <ul>' + rejected.map(r => '<li>Line ' + r.lineNumber + ': ' + escapeHtml(r.problem) + ' — <code>' + escapeHtml(r.raw) + '</code></li>').join('') + '</ul>',
+          '</div>'
+        ].join("\n");
+      }
+
+      const cardsHtml = readings.map(r => renderReadingCard(r, T)).join("\n\n");
+      container.innerHTML = rejectedHtml + '<div class="readings-container">' + cardsHtml + '</div>';
+    }
+
+    async function verifyLogChain(readings) {
+      const problems = [];
+      let expectedPrev = "";
+
+      for (let i = 0; i < readings.length; i++) {
+        const line = readings[i];
+        if (line.prev_hash !== expectedPrev) {
+          problems.push("line " + i + ": prev_hash (" + (line.prev_hash || "empty") + ") does not match previous hash (" + (expectedPrev || "empty") + ")");
+        }
+        const { hash: _h, sig: _s, key: _k, prev_hash: _p, ...content } = line;
+        const recomputed = await sha256Hex(preimage(content, line.prev_hash));
+        if (recomputed !== line.hash) {
+          problems.push("line " + i + ": hashes to " + recomputed + " but claims " + line.hash);
+        }
+        if (i > 0 && line.read_at < readings[i - 1].read_at) {
+          problems.push("line " + i + ": read_at " + line.read_at + " precedes previous line " + readings[i - 1].read_at);
+        }
+        expectedPrev = recomputed;
+      }
+
+      return problems;
+    }
+
+    // Setup event handlers
+    const inputT = document.getElementById("input-t");
+    const labelIso = document.getElementById("label-iso");
+    const vBox = document.getElementById("verification-box");
+
+    function updateTimeDisplay(t) {
+      currentT = t;
+      inputT.value = t;
+      labelIso.textContent = new Date(t).toISOString();
+      renderLog(currentLogText, currentT);
+    }
+
+    inputT.addEventListener("input", (e) => {
+      const val = parseInt(e.target.value, 10);
+      if (Number.isFinite(val)) {
+        updateTimeDisplay(val);
+      }
+    });
+
+    document.getElementById("btn-now").addEventListener("click", () => {
+      updateTimeDisplay(Date.now());
+    });
+
+    document.getElementById("btn-demo").addEventListener("click", () => {
+      currentLogText = DEMO_LOG;
+      vBox.style.display = "none";
+      renderLog(currentLogText, currentT);
+    });
+
+    document.getElementById("btn-toggle-paste").addEventListener("click", () => {
+      const pBox = document.getElementById("paste-box");
+      pBox.classList.toggle("active");
+    });
+
+    document.getElementById("btn-apply-paste").addEventListener("click", () => {
+      const text = document.getElementById("paste-text").value;
+      if (text.trim()) {
+        currentLogText = text;
+        vBox.style.display = "none";
+        renderLog(currentLogText, currentT);
+      }
+    });
+
+    document.getElementById("btn-clear-paste").addEventListener("click", () => {
+      document.getElementById("paste-text").value = "";
+    });
+
+    document.getElementById("file-input").addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          currentLogText = evt.target.result;
+          vBox.style.display = "none";
+          renderLog(currentLogText, currentT);
+        };
+        reader.readAsText(file);
+      }
+    });
+
+    // Drag and drop
+    const dropzone = document.getElementById("dropzone");
+    dropzone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    });
+    dropzone.addEventListener("dragleave", () => {
+      dropzone.classList.remove("dragover");
+    });
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          currentLogText = evt.target.result;
+          vBox.style.display = "none";
+          renderLog(currentLogText, currentT);
+        };
+        reader.readAsText(file);
+      }
+    });
+
+    // Fetch button
+    document.getElementById("btn-fetch").addEventListener("click", async () => {
+      try {
+        const res = await fetch("readings.jsonl");
+        if (!res.ok) throw new Error("HTTP " + res.status + " " + res.statusText);
+        const text = await res.text();
+        currentLogText = text;
+        vBox.style.display = "none";
+        renderLog(currentLogText, currentT);
+      } catch (err) {
+        alert("Could not fetch readings.jsonl: " + err.message + "\n\nTip: When opening via file://, browser security blocks fetch. Use file picker or drag & drop.");
+      }
+    });
+
+    // Recompute & Verify button
+    document.getElementById("btn-verify").addEventListener("click", async () => {
+      const { readings, rejected } = parseLog(currentLogText);
+      if (readings.length === 0) {
+        vBox.className = "verification-status status-error";
+        vBox.innerHTML = "<strong>Verification Error:</strong> No valid readings in log to verify.";
+        return;
+      }
+      if (rejected.length > 0) {
+        vBox.className = "verification-status status-error";
+        vBox.innerHTML = "<strong>Refusing to verify:</strong> Log contains " + rejected.length + " unusable line(s).";
+        return;
+      }
+
+      vBox.className = "verification-status status-ok";
+      vBox.textContent = "Recomputing cryptographic hashes in browser...";
+
+      const problems = await verifyLogChain(readings);
+      if (problems.length === 0) {
+        vBox.className = "verification-status status-ok";
+        vBox.innerHTML = "<strong>✓ Hash chain verified intact:</strong> Recomputed SHA-256 over " + readings.length + " line(s) byte-for-byte. Every link and timestamp verified independently.";
+      } else {
+        vBox.className = "verification-status status-error";
+        vBox.innerHTML = "<strong>✗ Chain verification failed:</strong><br>" + problems.map(p => escapeHtml(p)).join("<br>");
+      }
+    });
+
+    // Initial render
+    updateTimeDisplay(Date.now());
+  </script>
+</body>
+</html>
