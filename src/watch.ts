@@ -22,6 +22,8 @@ import type { ChainState, Commitment } from "./commitment.ts";
 import { evaluate } from "./evaluate.ts";
 import { append, type Appender } from "./log.ts";
 import type { Reading, RpcExchange } from "./reading.ts";
+import { advanceCoverage, GAP_VERDICT, planCeiling, windowsToCover, type Window } from "./coverage.ts";
+import { toExchanges, type Agreement } from "./agreement.ts";
 
 export interface CycleDeps {
   /**
@@ -151,4 +153,162 @@ export async function cycleAll(
     }
   }
   return { done, failed };
+}
+
+// --- Coverage-aware cycle (issue #15) -------------------------------------
+//
+// cycle() reads one pinned block and reports the tip if that block is agreed.
+// watchCycle() reads EVERY block from the last covered height to the tip, in
+// windows bounded by the per-provider ceilings, and reports the tip only if the
+// whole range is covered. A watcher falling behind must not look like a watcher
+// seeing nothing wrong: a gap is published as UNREADABLE with the gap in it,
+// never smoothed to HELD.
+
+interface WindowRead {
+  window: Window;
+  method: string;
+  params: unknown[];
+  attempts: Attempt[];
+  agreement: Agreement;
+  covered: boolean;
+  result?: unknown;
+}
+
+export interface WatchDeps {
+  /** The tip height. Chosen by the caller, usually a finalized head. */
+  block: () => Promise<number>;
+  /**
+   * Read the logs for a block range [from, to] (inclusive) from two different
+   * providers. Returns the attempts, verbatim. The caller splits the range
+   * into windows bounded by the ceilings; this reads one window.
+   */
+  readWindow: (c: Commitment, from: number, to: number) => Promise<{ method: string; params: unknown[]; attempts: Attempt[] }>;
+  /** Turn an agreed RPC result into the state the evaluator reads. */
+  decode: (result: unknown, at_block: number, at_time: number) => ChainState;
+  /** T. Supplied, never read from the clock inside the pure code. */
+  now: () => number;
+  logPath: string;
+  write?: Appender;
+  /** The per-provider range ceilings. A property of the plan, not the chain. */
+  ceilings: Record<string, number>;
+  /** The current coverage state: the highest block read from both providers. */
+  covered: number;
+}
+
+export interface WatchResult {
+  commitment: string;
+  line: Reading;
+  /** The new coverage state, for the next cycle. */
+  covered: number;
+}
+
+/**
+ * Run one commitment through one COVERAGE-AWARE cycle and append exactly one
+ * line. Issue #15.
+ *
+ * Never throws for chain reasons -- an unreachable provider is a verdict, not
+ * an exception. It DOES throw if the log itself cannot be appended to, or if
+ * the ceilings are misconfigured.
+ */
+export async function watchCycle(c: Commitment, deps: WatchDeps): Promise<WatchResult> {
+  const at_time = deps.now();
+  const tip = await deps.block();
+  const ceiling = planCeiling(deps.ceilings);
+  const windows = windowsToCover(deps.covered, tip, ceiling);
+  const providerLabels = Object.keys(deps.ceilings).slice(0, 2);
+
+  // Read every window. A window is covered iff both providers answered it and
+  // their answers agree. A range only one answered for is never covered.
+  const reads: WindowRead[] = [];
+  for (const w of windows) {
+    let read: { method: string; params: unknown[]; attempts: Attempt[] };
+    try {
+      read = await deps.readWindow(c, w.from, w.to);
+    } catch (e) {
+      // A window that throws is a window that could not be read. Both providers
+      // failed, so it is not covered.
+      read = {
+        method: "eth_getLogs",
+        params: [{ fromBlock: w.from, toBlock: w.to }],
+        attempts: providerLabels.map((label) => ({
+          provider: label,
+          ok: false as const,
+          error: String(e).slice(0, 200),
+        })),
+      };
+    }
+    const agreement = agree(read.attempts);
+    reads.push({
+      window: w,
+      method: read.method,
+      params: read.params,
+      attempts: read.attempts,
+      agreement,
+      covered: agreement.agreed,
+      result: agreement.agreed ? agreement.result : undefined,
+    });
+  }
+
+  const decision = advanceCoverage(deps.covered, tip, reads);
+  const exchanges = reads.flatMap((r) => toExchanges(r.method, r.params, r.agreement));
+
+  if (!decision.caughtUp) {
+    // The gap is not covered. A watcher falling behind must not look like a
+    // watcher seeing nothing wrong: publish UNREADABLE with the gap in it.
+    const failures = reads
+      .filter((r) => !r.covered)
+      .map((r) => {
+        const failed = r.attempts.filter((a): a is Extract<Attempt, { ok: false }> => !a.ok);
+        return failed.map((f) => `${f.provider}: ${f.error}`).join("; ");
+      })
+      .filter((s) => s.length > 0)
+      .join("; ");
+    const line = await append(
+      deps.logPath,
+      {
+        commitment: c.id,
+        verdict: GAP_VERDICT,
+        reason: "coverage gap",
+        rpc: exchanges,
+        read_at: at_time,
+        note: `gap ${decision.gapFrom}..${decision.tip} (${decision.gapSize} block(s)) not read from both providers; covered=${decision.covered}${failures ? `; ${failures}` : ""}`.slice(0, 500),
+      },
+      deps.write,
+    );
+    return { commitment: c.id, line, covered: decision.covered };
+  }
+
+  // Covered up to the tip. The verdict about the tip is legitimate now.
+  const merged = mergeResults(reads);
+  const state = deps.decode(merged, tip, at_time);
+  const ev = evaluate(c, state, at_time);
+  const line = await append(
+    deps.logPath,
+    {
+      commitment: c.id,
+      verdict: ev.verdict,
+      reason: ev.reason,
+      rpc: exchanges,
+      read_at: at_time,
+      ...(ev.evidence ? { note: JSON.stringify(ev.evidence).slice(0, 500) } : {}),
+    },
+    deps.write,
+  );
+  return { commitment: c.id, line, covered: decision.covered };
+}
+
+/**
+ * Merge the agreed results from every covered window into one result for the
+ * full range. For array results (the eth_getLogs case) this is concatenation:
+ * the logs from each window, in block order. For non-array results, the last
+ * window's result is used -- a coverage-aware watcher is for range reads, and
+ * a non-array result here is a configuration mistake the caller should fix.
+ */
+function mergeResults(reads: WindowRead[]): unknown {
+  const results = reads.filter((r) => r.covered).map((r) => r.result);
+  if (results.length === 0) return undefined;
+  if (results.every((r) => Array.isArray(r))) {
+    return results.flat();
+  }
+  return results[results.length - 1];
 }
