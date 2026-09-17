@@ -19,6 +19,8 @@ export interface Provider {
   label: string;
   /** NEVER published. May contain an API key. */
   url: string;
+  /** Range ceiling in blocks for log requests (e.g. Alchemy 10, QuickNode 5). Optional property of the plan. */
+  maxRange?: number;
 }
 
 export interface JsonRpcRequest {

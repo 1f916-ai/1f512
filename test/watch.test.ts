@@ -9,7 +9,15 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cycle, cycleAll, type CycleDeps } from "../src/watch.ts";
+import {
+  cycle,
+  cycleAll,
+  type CycleDeps,
+  MemoryCoverageStore,
+  planPages,
+  effectiveRangeCeiling,
+  type BlockRange,
+} from "../src/watch.ts";
 import { load } from "../src/log.ts";
 import type { ChainState, Commitment, Transfer } from "../src/commitment.ts";
 
@@ -187,3 +195,179 @@ test("the log verifies after a run of mixed verdicts", async () => {
   const text = await readFile(p, "utf8");
   assert.ok(text.endsWith("\n"));
 });
+
+test("an uncovered block range cannot return HELD (mutation: delete coverage tracking)", async () => {
+  // THE CHECK SPECIFIED IN ISSUE #15:
+  // "A test where the provider caps the range below the gap, and the watcher is asked for a verdict:
+  // it must not return HELD. Delete the coverage tracking and that test goes red — name that mutation in the PR."
+  //
+  // Setup:
+  // Last covered block: 100.
+  // Chain tip: 150 (gap of 50 blocks).
+  // Provider ceiling: 10 blocks (caps range well below the gap).
+  //
+  // Inside the uncovered gap (block 105), an outbound transfer breaks the commitment.
+  // In the latest 10 blocks (141..150), no transfers occur.
+  //
+  // With coverage tracking:
+  // The watcher knows it must cover from 101 to 150 across paged requests.
+  // It reads 101..110, uncovers the break at block 105, and reports BROKEN (never HELD).
+  //
+  // Under the mutation (deleting coverage tracking):
+  // The naive watcher only queries the tip window [141, 150], observes no transfers,
+  // and erroneously reports HELD over an uncovered break.
+  const p = await tmpLog();
+  const coverage = new MemoryCoverageStore();
+  coverage.setCovered(C.id, 100);
+
+  const brokenTransfer = xfer({ at_block: 105, tx: "0x" + "bb".repeat(32) });
+  const requestedRanges: BlockRange[] = [];
+
+  const d = deps(p, {
+    block: async () => 150,
+    coverage,
+    providerCeilings: { alpha: 10, beta: 10 },
+    read: async (_c, at_block, range) => {
+      if (range) requestedRanges.push({ ...range });
+      const transfers = range && range.from <= 105 && 105 <= range.to ? [brokenTransfer] : [];
+      return {
+        method: "eth_getLogs",
+        params: [{ fromBlock: range?.from, toBlock: range?.to }],
+        attempts: [
+          { provider: "alpha", ok: true, result: transfers, at_block },
+          { provider: "beta", ok: true, result: transfers, at_block },
+        ],
+      };
+    },
+  });
+
+  const r = await cycle(C, d);
+
+  // MUST NOT RETURN HELD:
+  assert.notEqual(r.line.verdict, "HELD", "an uncovered break must never report HELD");
+  assert.equal(r.line.verdict, "BROKEN", "the break in the gap must be discovered");
+  assert.match(String(r.line.note), /0xbbbb/, "the transfer evidence is published");
+  assert.equal(coverage.getCovered(C.id), 150, "coverage advanced all the way to tip");
+  assert.equal(requestedRanges.length, 5, "5 paged requests made (10 blocks each for 50 blocks)");
+  assert.deepEqual(requestedRanges[0], { from: 101, to: 110 });
+  assert.deepEqual(requestedRanges[4], { from: 141, to: 150 });
+});
+
+test("never advance past a range only one answered for", async () => {
+  // Requirement: Track per-commitment covered block height read from both providers;
+  // never advance past a range only one answered for.
+  const p = await tmpLog();
+  const coverage = new MemoryCoverageStore();
+  coverage.setCovered(C.id, 100);
+
+  const d = deps(p, {
+    block: async () => 130, // 3 pages: 101..110, 111..120, 121..130
+    coverage,
+    providerCeilings: { alpha: 10, beta: 10 },
+    read: async (_c, at_block, range) => {
+      // Page 1 (101..110): both answer ok
+      if (range?.from === 101) {
+        return {
+          method: "eth_getLogs",
+          params: [],
+          attempts: [
+            { provider: "alpha", ok: true, result: [], at_block },
+            { provider: "beta", ok: true, result: [], at_block },
+          ],
+        };
+      }
+      // Page 2 (111..120): alpha answers ok, beta fails with 429
+      return {
+        method: "eth_getLogs",
+        params: [],
+        attempts: [
+          { provider: "alpha", ok: true, result: [], at_block },
+          { provider: "beta", ok: false, error: "http 429" },
+        ],
+      };
+    },
+  });
+
+  const r = await cycle(C, d);
+
+  assert.equal(r.line.verdict, "UNREADABLE");
+  assert.equal(r.line.reason, "one_failed");
+  assert.match(String(r.line.note), /beta: http 429/);
+  assert.match(String(r.line.note), /uncovered gap: blocks 111\.\.130 \(covered up to 110\)/);
+
+  // Coverage MUST have advanced to 110, and STOPPED there:
+  assert.equal(coverage.getCovered(C.id), 110, "coverage must stop at the last block both answered for");
+});
+
+test("when the watcher cannot keep up, publish UNREADABLE with the gap in it", async () => {
+  // Requirement: When it cannot keep up — the gap is growing faster than it closes —
+  // say so as a published UNREADABLE line with the gap in it. A watcher falling behind
+  // must not look like a watcher seeing nothing wrong.
+  const p = await tmpLog();
+  const coverage = new MemoryCoverageStore();
+  coverage.setCovered(C.id, 100);
+
+  let readCalled = false;
+  const d = deps(p, {
+    block: async () => 500, // Gap of 400 blocks
+    coverage,
+    maxGap: 50, // Ceiling on acceptable gap
+    read: async () => {
+      readCalled = true;
+      throw new Error("should not be called when gap cannot be closed");
+    },
+  });
+
+  const r = await cycle(C, d);
+
+  assert.equal(r.line.verdict, "UNREADABLE");
+  assert.equal(r.line.reason, "gap_uncovered");
+  assert.match(String(r.line.note), /gap of 400 blocks \(covered 100, tip 500\) exceeds maxGap of 50/);
+  assert.equal(readCalled, false);
+  assert.equal(coverage.getCovered(C.id), 100, "coverage was not advanced");
+});
+
+test("provider range ceilings are taken as configuration and the strictest ceiling is respected", async () => {
+  // Requirement: Take the range ceiling as configuration per provider,
+  // because it is a property of the plan, not the chain.
+  const p = await tmpLog();
+  const coverage = new MemoryCoverageStore();
+  coverage.setCovered(C.id, 100);
+
+  const ranges: BlockRange[] = [];
+  const d = deps(p, {
+    block: async () => 115, // Gap of 15 blocks: 101..115
+    coverage,
+    // Alchemy free ceiling: 10, QuickNode free ceiling: 5
+    providerCeilings: { alchemy: 10, quicknode: 5 },
+    read: async (_c, at_block, range) => {
+      if (range) ranges.push({ ...range });
+      return {
+        method: "eth_getLogs",
+        params: [],
+        attempts: [
+          { provider: "alchemy", ok: true, result: [], at_block },
+          { provider: "quicknode", ok: true, result: [], at_block },
+        ],
+      };
+    },
+  });
+
+  const r = await cycle(C, d);
+  assert.equal(r.line.verdict, "HELD");
+  assert.equal(effectiveRangeCeiling(d.providerCeilings), 5, "effective ceiling is 5 (the stricter of 10 and 5)");
+
+  // Verify that every page adhered to the strictest ceiling (<= 5 blocks)
+  assert.equal(ranges.length, 3);
+  for (const range of ranges) {
+    const span = range.to - range.from + 1;
+    assert.ok(span <= 5, `range span ${span} exceeds strictest ceiling of 5`);
+  }
+  assert.deepEqual(ranges, [
+    { from: 101, to: 105 },
+    { from: 106, to: 110 },
+    { from: 111, to: 115 },
+  ]);
+  assert.equal(coverage.getCovered(C.id), 115);
+});
+
