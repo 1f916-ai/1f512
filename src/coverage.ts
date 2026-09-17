@@ -98,14 +98,42 @@ export function effectiveRangeCeiling(
   if (!config) return fallback;
   let values: number[] = [];
   if (Array.isArray(config)) {
-    values = config
-      .map((p) => p.maxRange)
-      .filter((n): n is number => typeof n === "number" && n > 0);
+    if (config.length === 0) return fallback;
+    for (const p of config) {
+      if (p.maxRange !== undefined) {
+        if (typeof p.maxRange !== "number" || p.maxRange <= 0 || !Number.isInteger(p.maxRange)) {
+          throw new Error(`maxRange must be a positive integer, got ${p.maxRange}`);
+        }
+        values.push(p.maxRange);
+      }
+    }
   } else {
-    values = Object.values(config).filter((n): n is number => typeof n === "number" && n > 0);
+    const entries = Object.entries(config);
+    if (entries.length === 0) return fallback;
+    for (const [key, val] of entries) {
+      if (typeof val !== "number" || val <= 0 || !Number.isInteger(val)) {
+        throw new Error(`maxRange for ${key} must be a positive integer, got ${val}`);
+      }
+      values.push(val);
+    }
   }
   if (values.length === 0) return fallback;
   return Math.min(...values);
+}
+
+/**
+ * Detect whether a watcher is falling behind (the gap is growing faster than it closes).
+ * Differentiates a closing gap from a drifting gap.
+ */
+export function fallingBehind(
+  prevGap: number,
+  curGap: number,
+  capacity: number,
+): { behind: boolean; drift: number; atCapacity: boolean } {
+  const drift = curGap - prevGap;
+  const behind = drift > 0;
+  const atCapacity = prevGap > capacity;
+  return { behind, drift, atCapacity };
 }
 
 /**

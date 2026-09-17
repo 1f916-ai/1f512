@@ -36,6 +36,7 @@ import {
   planPages,
   effectiveRangeCeiling,
   advanceCoverage,
+  fallingBehind,
 } from "./coverage.ts";
 import { evaluate } from "./evaluate.ts";
 import { append, type Appender } from "./log.ts";
@@ -48,6 +49,7 @@ export {
   planPages,
   effectiveRangeCeiling,
   advanceCoverage,
+  fallingBehind,
 };
 
 export interface CycleDeps {
@@ -196,16 +198,19 @@ export async function cycle(c: Commitment, deps: CycleDeps): Promise<CycleResult
 
   // Coverage tracking is active
   const coverage = deps.coverage;
-  let lastCovered = await coverage.getCovered(c.id);
+  const storedCovered = await coverage.getCovered(c.id);
+  const isInitial = storedCovered === undefined;
 
-  if (lastCovered === undefined) {
-    if (deps.initialBlock !== undefined) {
-      lastCovered = typeof deps.initialBlock === "function" ? await deps.initialBlock(c, tip) : deps.initialBlock;
-    } else {
-      // First observation defaults to the tip
-      lastCovered = tip;
-      await coverage.setCovered(c.id, tip);
-    }
+  let lastCovered: number;
+  if (storedCovered !== undefined) {
+    lastCovered = storedCovered;
+  } else if (deps.initialBlock !== undefined) {
+    const initB = typeof deps.initialBlock === "function" ? await deps.initialBlock(c, tip) : deps.initialBlock;
+    // Inclusive prefix watermark starts at initB - 1 so initB itself is included in planned pages
+    lastCovered = initB - 1;
+  } else {
+    // First observation with no prior coverage starts at tip: watermark is tip - 1 so tip itself is verified
+    lastCovered = tip - 1;
   }
 
   const ceiling = deps.maxRange ?? effectiveRangeCeiling(deps.providerCeilings, 10);
@@ -221,7 +226,7 @@ export async function cycle(c: Commitment, deps: CycleDeps): Promise<CycleResult
         reason: "gap_uncovered",
         rpc: [],
         read_at: at_time,
-        note: `watcher falling behind: gap of ${gap} blocks (covered ${lastCovered}, tip ${tip}) exceeds maxGap of ${deps.maxGap}`,
+        note: `watcher falling behind: gap of ${gap} blocks (covered ${isInitial ? "none" : lastCovered}, tip ${tip}) exceeds maxGap of ${deps.maxGap}`,
       },
       deps.write,
     );
@@ -306,6 +311,15 @@ export async function cycle(c: Commitment, deps: CycleDeps): Promise<CycleResult
     return { commitment: c.id, line };
   }
 
+  const combine = (results: unknown[]): unknown => {
+    if (deps.combineResults) return deps.combineResults(results);
+    if (results.every(Array.isArray)) return results.flat();
+    if (results.length === 1) return results[0];
+    const allTransfers = results.flatMap((r: any) => (Array.isArray(r?.transfers) ? r.transfers : []));
+    const allBalances = Object.assign({}, ...results.map((r: any) => r?.balances ?? {}));
+    return { transfers: allTransfers, balances: allBalances };
+  };
+
   // Page across every block between lastCovered + 1 and tip
   let currentCovered = lastCovered;
   const allExchanges: RpcExchange[] = [];
@@ -316,8 +330,33 @@ export async function cycle(c: Commitment, deps: CycleDeps): Promise<CycleResult
     try {
       read = await deps.read(c, tip, page);
     } catch (e) {
-      // Unreachable or error during page read: coverage stops at last agreed height
-      await coverage.setCovered(c.id, currentCovered);
+      // Unreachable or error during page read:
+      if (currentCovered > lastCovered) {
+        await coverage.setCovered(c.id, currentCovered);
+      }
+
+      // If earlier pages in this cycle already witnessed a break, BROKEN stands:
+      // a break you have seen does not become unseen because you have not finished looking.
+      if (pageResults.length > 0) {
+        const partialState = deps.decode(combine(pageResults), currentCovered, at_time);
+        const ev = evaluate(c, partialState, at_time);
+        if (ev.verdict === "BROKEN") {
+          const line = await append(
+            deps.logPath,
+            {
+              commitment: c.id,
+              verdict: "BROKEN",
+              reason: ev.reason,
+              rpc: allExchanges,
+              read_at: at_time,
+              ...(ev.evidence ? { note: JSON.stringify(ev.evidence).slice(0, 500) } : {}),
+            },
+            deps.write,
+          );
+          return { commitment: c.id, line };
+        }
+      }
+
       const line = await append(
         deps.logPath,
         {
@@ -326,7 +365,7 @@ export async function cycle(c: Commitment, deps: CycleDeps): Promise<CycleResult
           reason: "could not read the chain",
           rpc: allExchanges,
           read_at: at_time,
-          note: `uncovered gap: blocks ${page.from}..${tip} (covered up to ${currentCovered}): ${String(e).slice(0, 200)}`,
+          note: `uncovered gap: blocks ${page.from}..${tip} (covered up to ${isInitial && currentCovered === lastCovered ? "none" : currentCovered}): ${String(e).slice(0, 200)}`,
         },
         deps.write,
       );
@@ -342,7 +381,30 @@ export async function cycle(c: Commitment, deps: CycleDeps): Promise<CycleResult
     const step = advanceCoverage(currentCovered, page, a.agreed);
     if (!step.advanced) {
       // NEVER advance past a range only one answered for!
-      await coverage.setCovered(c.id, currentCovered);
+      if (currentCovered > lastCovered) {
+        await coverage.setCovered(c.id, currentCovered);
+      }
+
+      // Check if confirmed pages read so far already witnessed a break:
+      if (pageResults.length > 0) {
+        const partialState = deps.decode(combine(pageResults), currentCovered, at_time);
+        const ev = evaluate(c, partialState, at_time);
+        if (ev.verdict === "BROKEN") {
+          const line = await append(
+            deps.logPath,
+            {
+              commitment: c.id,
+              verdict: "BROKEN",
+              reason: ev.reason,
+              rpc: allExchanges,
+              read_at: at_time,
+              ...(ev.evidence ? { note: JSON.stringify(ev.evidence).slice(0, 500) } : {}),
+            },
+            deps.write,
+          );
+          return { commitment: c.id, line };
+        }
+      }
 
       const line = await append(
         deps.logPath,
@@ -352,7 +414,7 @@ export async function cycle(c: Commitment, deps: CycleDeps): Promise<CycleResult
           reason: a.reason,
           rpc: allExchanges,
           read_at: at_time,
-          note: `uncovered gap: blocks ${page.from}..${tip} (covered up to ${currentCovered}); ${describeFailures(read.attempts)}`.slice(0, 500),
+          note: `uncovered gap: blocks ${page.from}..${tip} (covered up to ${isInitial && currentCovered === lastCovered ? "none" : currentCovered}); ${describeFailures(read.attempts)}`.slice(0, 500),
         },
         deps.write,
       );
@@ -366,19 +428,7 @@ export async function cycle(c: Commitment, deps: CycleDeps): Promise<CycleResult
   }
 
   // Every block up to tip was successfully read and agreed
-  let combined: unknown;
-  if (deps.combineResults) {
-    combined = deps.combineResults(pageResults);
-  } else if (pageResults.every(Array.isArray)) {
-    combined = pageResults.flat();
-  } else if (pageResults.length === 1) {
-    combined = pageResults[0];
-  } else {
-    const allTransfers = pageResults.flatMap((r: any) => (Array.isArray(r?.transfers) ? r.transfers : []));
-    const allBalances = Object.assign({}, ...pageResults.map((r: any) => r?.balances ?? {}));
-    combined = { transfers: allTransfers, balances: allBalances };
-  }
-
+  const combined = combine(pageResults);
   const state = deps.decode(combined, tip, at_time);
   const ev = evaluate(c, state, at_time);
   const line = await append(

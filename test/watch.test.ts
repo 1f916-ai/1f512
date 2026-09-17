@@ -371,3 +371,101 @@ test("provider range ceilings are taken as configuration and the strictest ceili
   assert.equal(coverage.getCovered(C.id), 115);
 });
 
+test("initial read failure does NOT record coverage in store (killing mutation: eager setCovered on unconfirmed tip)", async () => {
+  // Killing mutation: setCovered(c.id, tip) eagerly before read succeeds.
+  // If an initial read fails, the watcher must NOT record the tip as covered.
+  // Otherwise, the next cycle skips that block and returns HELD over unread chain state.
+  const p = await tmpLog();
+  const coverage = new MemoryCoverageStore();
+
+  const d = deps(p, {
+    block: async () => 100,
+    coverage,
+    read: async () => {
+      throw new Error("rpc down");
+    },
+  });
+
+  const r = await cycle(C, d);
+  assert.equal(r.line.verdict, "UNREADABLE");
+  assert.equal(coverage.getCovered(C.id), undefined, "failed initial read must NEVER record coverage");
+});
+
+test("initialBlock includes start block and does not skip block 0 / start block", async () => {
+  // Killing mutation: initialise lastCovered to initialBlock instead of initialBlock - 1.
+  // That mutation would cause planPages to start at initialBlock + 1, skipping the very first block.
+  const p = await tmpLog();
+  const coverage = new MemoryCoverageStore();
+  const requestedRanges: BlockRange[] = [];
+
+  const d = deps(p, {
+    block: async () => 105,
+    coverage,
+    initialBlock: 100,
+    read: async (_c, at_block, range) => {
+      if (range) requestedRanges.push({ ...range });
+      return {
+        method: "eth_getLogs",
+        params: [],
+        attempts: [
+          { provider: "alpha", ok: true, result: [], at_block },
+          { provider: "beta", ok: true, result: [], at_block },
+        ],
+      };
+    },
+  });
+
+  const r = await cycle(C, d);
+  assert.equal(r.line.verdict, "HELD");
+  assert.equal(requestedRanges.length, 1);
+  assert.equal(requestedRanges[0]!.from, 100, "start block 100 MUST be included in the read range");
+  assert.equal(requestedRanges[0]!.to, 105);
+  assert.equal(coverage.getCovered(C.id), 105);
+});
+
+test("witnessed break on page 1 is preserved as BROKEN even if subsequent page fails", async () => {
+  // Requirement: "A BROKEN found inside the blocks that were read still stands —
+  // a break you have seen does not become unseen because you have not finished looking."
+  const p = await tmpLog();
+  const coverage = new MemoryCoverageStore();
+  coverage.setCovered(C.id, 100);
+
+  const brokenTransfer = xfer({ at_block: 105, tx: "0x" + "ee".repeat(32) });
+
+  const d = deps(p, {
+    block: async () => 130, // Pages: 101..110, 111..120, 121..130
+    coverage,
+    providerCeilings: { alpha: 10, beta: 10 },
+    read: async (_c, at_block, range) => {
+      // Page 1: both answer ok, break found at block 105!
+      if (range?.from === 101) {
+        return {
+          method: "eth_getLogs",
+          params: [],
+          attempts: [
+            { provider: "alpha", ok: true, result: [brokenTransfer], at_block },
+            { provider: "beta", ok: true, result: [brokenTransfer], at_block },
+          ],
+        };
+      }
+      // Page 2: beta fails with 429
+      return {
+        method: "eth_getLogs",
+        params: [],
+        attempts: [
+          { provider: "alpha", ok: true, result: [], at_block },
+          { provider: "beta", ok: false, error: "http 429" },
+        ],
+      };
+    },
+  });
+
+  const r = await cycle(C, d);
+
+  // A break confirmed by both providers MUST NOT be masked by a subsequent page failure:
+  assert.equal(r.line.verdict, "BROKEN", "witnessed break must be reported");
+  assert.match(String(r.line.note), /0xeeee/, "evidence of break must be published");
+  assert.equal(coverage.getCovered(C.id), 110, "coverage must record through the confirmed page");
+});
+
+

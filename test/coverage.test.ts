@@ -11,6 +11,7 @@ import {
   planPages,
   effectiveRangeCeiling,
   advanceCoverage,
+  fallingBehind,
   MemoryCoverageStore,
 } from "../src/coverage.ts";
 
@@ -43,6 +44,34 @@ test("effectiveRangeCeiling takes the STRICTEST ceiling across providers", () =>
   // Fallback when unconfigured
   assert.equal(effectiveRangeCeiling(undefined, 20), 20);
   assert.equal(effectiveRangeCeiling({}, 15), 15);
+  assert.equal(effectiveRangeCeiling([], 12), 12);
+
+  // Killing mutation: clamp maxRange to 1 instead of throwing.
+  // A typo'd 0 or negative number in configuration must be refused immediately.
+  assert.throws(() => effectiveRangeCeiling({ bad: 0 }), /maxRange for bad must be a positive integer/);
+  assert.throws(() => effectiveRangeCeiling({ bad: -5 }), /maxRange for bad must be a positive integer/);
+  assert.throws(() => effectiveRangeCeiling({ bad: 2.5 }), /maxRange for bad must be a positive integer/);
+  assert.throws(() => effectiveRangeCeiling([{ maxRange: 0 }]), /maxRange must be a positive integer/);
+});
+
+test("fallingBehind distinguishes gap growth from healthy gap reduction", () => {
+  // Killing mutation: report behind on any positive gap rather than on gap growth.
+  // A watcher that is 120 blocks behind and closing to 80 is healthy, not falling behind.
+  const closing = fallingBehind(120, 80, 50);
+  assert.equal(closing.behind, false, "a shrinking gap is not falling behind");
+  assert.equal(closing.drift, -40);
+
+  // Drifting gap beyond capacity:
+  const drifting = fallingBehind(80, 120, 50);
+  assert.equal(drifting.behind, true, "gap growth must alarm");
+  assert.equal(drifting.drift, 40);
+  assert.equal(drifting.atCapacity, true, "it was already beyond what one cycle can close");
+
+  // Drifting gap within capacity:
+  const idle = fallingBehind(10, 30, 50);
+  assert.equal(idle.behind, true);
+  assert.equal(idle.drift, 20);
+  assert.equal(idle.atCapacity, false, "within capacity, but drifting");
 });
 
 test("advanceCoverage advances ONLY when both providers agreed", () => {
