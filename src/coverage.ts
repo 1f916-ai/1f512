@@ -57,6 +57,60 @@ export interface Coverage {
   commitment: string;
   from_block: number;
   covered_through: number;
+  /**
+   * THE SET THIS RECORD CERTIFIES AGAINST, frozen at the record.
+   *
+   * Reed (reed-public.onrender.com) found why this field has to exist, with a
+   * fixture rather than an argument: read 100..104 from alpha+beta, change the
+   * required set to beta+gamma, read 105..109, and the old `coverageCheck`
+   * answered `{covered: true, through: 109}` although gamma never read a single
+   * block below 105. That answer is DEFENSIBLE under "each block was read by
+   * whichever providers were required at the time" and FALSE under "every block
+   * was read by the current required set" -- and the record carried nothing that
+   * said which one it meant.
+   *
+   * A verdict whose meaning lives in the head of whoever wrote the caller is
+   * not a record. At restart or failover -- exactly when the required set is
+   * most likely to differ -- that head is gone.
+   *
+   * Normalised (sorted, deduped) and frozen so two records built from the same
+   * labels in different order compare equal.
+   */
+  required_set: readonly string[];
+  /**
+   * Bumped by `startEpoch`. Coverage under a changed set is NOT a continuation
+   * of coverage under the old one, and a single watermark cannot summarise two
+   * different policies.
+   */
+  epoch: number;
+  /** Closed epochs, oldest first. What the old set did cover, kept rather than erased. */
+  superseded: readonly SupersededEpoch[];
+}
+
+/** What one closed epoch had read, under which set. */
+export interface SupersededEpoch {
+  epoch: number;
+  required_set: readonly string[];
+  covered_through: number;
+}
+
+/**
+ * Sorted, deduped and frozen. An empty set is refused HERE rather than in a
+ * precondition travelling in prose -- Reed's second case: `ceiling([])` already
+ * refused an empty plan while `advance(..., [], [])` cleared the guard, so the
+ * same configuration error was caught on one path and honoured on the other.
+ */
+function normaliseRequired(required: readonly string[], where: string): readonly string[] {
+  const set = [...new Set(required)].sort();
+  if (set.length === 0) {
+    throw new Error(`${where}: an empty required set is not a set of required providers`);
+  }
+  return Object.freeze(set);
+}
+
+/** Do two normalised sets name the same providers? */
+function sameSet(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((label, i) => label === b[i]);
 }
 
 /** A closed block interval. Both ends inclusive, matching `eth_getLogs`. */
@@ -65,8 +119,50 @@ export interface Range {
   to: number;
 }
 
-export function newCoverage(commitment: string, from_block: number): Coverage {
-  return { commitment, from_block, covered_through: from_block - 1 };
+export function newCoverage(
+  commitment: string,
+  from_block: number,
+  required: readonly string[],
+): Coverage {
+  return {
+    commitment,
+    from_block,
+    covered_through: from_block - 1,
+    required_set: normaliseRequired(required, "newCoverage"),
+    epoch: 0,
+    superseded: Object.freeze([]),
+  };
+}
+
+/**
+ * Start a new coverage epoch under a different required set.
+ *
+ * THE RESET IS THE POINT. Coverage under beta+gamma is not extended by what
+ * alpha+beta read; it starts empty, so the blocks the new set has not read
+ * appear as the gap they are. The old epoch is kept in `superseded` rather than
+ * erased -- what alpha+beta covered remains true of alpha+beta, and a reader
+ * asking the weaker question can still answer it.
+ *
+ * Calling this with the same set is a no-op rather than a reset: a caller that
+ * re-asserts its configuration every cycle must not thereby re-read the chain.
+ */
+export function startEpoch(cov: Coverage, required: readonly string[]): Coverage {
+  const next = normaliseRequired(required, "startEpoch");
+  if (sameSet(next, cov.required_set)) return cov;
+  return {
+    ...cov,
+    required_set: next,
+    epoch: cov.epoch + 1,
+    covered_through: cov.from_block - 1,
+    superseded: Object.freeze([
+      ...cov.superseded,
+      {
+        epoch: cov.epoch,
+        required_set: cov.required_set,
+        covered_through: cov.covered_through,
+      },
+    ]),
+  };
 }
 
 /**
@@ -142,11 +238,28 @@ export function advance(
   cov: Coverage,
   range: Range,
   answeredBy: readonly string[],
-  required: readonly string[],
+  required: readonly string[] = cov.required_set,
 ): Coverage {
+  // CONDITION 0, and it is Reed's: the set answered against must be the set
+  // this record certifies. A caller that has reconfigured its providers is not
+  // continuing this record's coverage, it is starting a new epoch, and it has
+  // to say so with startEpoch(). Silently honouring the new set is how blocks
+  // gamma never read end up inside a `covered: true`.
+  //
+  // Throwing rather than returning unchanged: an empty set is a configuration
+  // error and a mismatched set is a caller error, and neither should be
+  // absorbed into "coverage did not move" -- a watcher that never advances for
+  // a reason nobody prints looks exactly like a chain that is quiet.
+  const asked = normaliseRequired(required, "advance");
+  if (!sameSet(asked, cov.required_set)) {
+    throw new Error(
+      `advance: required set [${asked.join(", ")}] is not this record's set ` +
+      `[${cov.required_set.join(", ")}]; call startEpoch() to change it`,
+    );
+  }
   if (range.to < range.from) return cov;
   const answered = new Set(answeredBy);
-  for (const label of required) {
+  for (const label of cov.required_set) {
     if (!answered.has(label)) return cov; // condition 1
   }
   if (range.from !== cov.covered_through + 1) return cov; // condition 2
@@ -156,16 +269,24 @@ export function advance(
 export interface CoverageOk {
   covered: true;
   through: number;
+  /** WHAT THIS CLEARANCE IS RELATIVE TO. A `true` that does not carry its set
+   *  is the ambiguity Reed found, published. */
+  epoch: number;
+  required_set: readonly string[];
 }
 
 export interface CoverageShort {
   covered: false;
   verdict: Extract<Verdict, "UNREADABLE">;
   /** Machine-readable, like every other reason in this project. */
-  reason: "coverage_gap";
+  reason: "coverage_gap" | "required_set_changed";
   gap: number;
   covered_through: number;
   tip: number;
+  epoch: number;
+  required_set: readonly string[];
+  /** Set only for `required_set_changed`: what the caller asked about. */
+  asked_set?: readonly string[];
 }
 
 export type CoverageCheck = CoverageOk | CoverageShort;
@@ -184,9 +305,47 @@ export type CoverageCheck = CoverageOk | CoverageShort;
  * found inside the blocks that WERE read stands on its own -- a break you have
  * seen does not become unseen because you have not finished looking.
  */
-export function coverageCheck(cov: Coverage, tip: number): CoverageCheck {
+export function coverageCheck(
+  cov: Coverage,
+  tip: number,
+  under?: readonly string[],
+): CoverageCheck {
+  // THE STRONGER QUESTION REFUSES INSTEAD OF ANSWERING.
+  //
+  // Without `under`, this answers "covered through N under required-set S",
+  // and S is now in the result so the answer cannot be read as more than it is.
+  // With `under`, the caller is asking the stronger question -- was every block
+  // read by the set I am running NOW -- and if that set differs from the one
+  // this record certifies, the honest answer is not `true` and not `false`
+  // either. It is a refusal the caller can see, carrying both sets.
+  //
+  // Reed's case lands here: the switched record would have said
+  // `{covered: true, through: 109}` to a caller meaning beta+gamma.
+  if (under !== undefined) {
+    const asked = normaliseRequired(under, "coverageCheck");
+    if (!sameSet(asked, cov.required_set)) {
+      return {
+        covered: false,
+        verdict: "UNREADABLE",
+        reason: "required_set_changed",
+        gap: gap(cov, tip),
+        covered_through: cov.covered_through,
+        tip,
+        epoch: cov.epoch,
+        required_set: cov.required_set,
+        asked_set: asked,
+      };
+    }
+  }
   const g = gap(cov, tip);
-  if (g === 0) return { covered: true, through: cov.covered_through };
+  if (g === 0) {
+    return {
+      covered: true,
+      through: cov.covered_through,
+      epoch: cov.epoch,
+      required_set: cov.required_set,
+    };
+  }
   return {
     covered: false,
     verdict: "UNREADABLE",
@@ -194,6 +353,8 @@ export function coverageCheck(cov: Coverage, tip: number): CoverageCheck {
     gap: g,
     covered_through: cov.covered_through,
     tip,
+    epoch: cov.epoch,
+    required_set: cov.required_set,
   };
 }
 
