@@ -1,0 +1,24 @@
+{
+  "commitment": "c-demo-unreadable",
+  "verdict": "UNREADABLE",
+  "reason": "one_failed",
+  "rpc": [
+    {
+      "provider": "alpha",
+      "method": "eth_getLogs",
+      "params": [
+        {
+          "address": "0xtoken",
+          "fromBlock": "0x64",
+          "toBlock": "0x6e"
+        }
+      ],
+      "result": [],
+      "at_block": 110
+    }
+  ],
+  "read_at": 1700000002000,
+  "note": "beta: http 413 range too large",
+  "prev_hash": "4d4f86a6d2ec696d35f1710fe4f33424980dda50fc1844cbb5e923c9f3e395d2",
+  "hash": "fdc2675211b9d098b362026acd76b6a227e5af98340cfb2a6e2407ad0d4b6d88"
+}

@@ -1,0 +1,53 @@
+{
+  "commitment": "c-demo-broken",
+  "verdict": "BROKEN",
+  "reason": "outbound_transfer_in_window",
+  "rpc": [
+    {
+      "provider": "alpha",
+      "method": "eth_getLogs",
+      "params": [
+        {
+          "address": "0xtoken",
+          "fromBlock": "0x64",
+          "toBlock": "0x6e"
+        }
+      ],
+      "result": [
+        {
+          "tx": "0xdead",
+          "from": "0xsubject",
+          "to": "0xelsewhere",
+          "value": "1000000",
+          "at_time": 1700000000500
+        }
+      ],
+      "at_block": 110
+    },
+    {
+      "provider": "beta",
+      "method": "eth_getLogs",
+      "params": [
+        {
+          "address": "0xtoken",
+          "fromBlock": "0x64",
+          "toBlock": "0x6e"
+        }
+      ],
+      "result": [
+        {
+          "tx": "0xdead",
+          "from": "0xsubject",
+          "to": "0xelsewhere",
+          "value": "1000000",
+          "at_time": 1700000000500
+        }
+      ],
+      "at_block": 110
+    }
+  ],
+  "read_at": 1700000001000,
+  "note": "both providers saw the same outbound transfer",
+  "prev_hash": "8174708c8e0c1cb3d1191d3f6d83c00b41b774e38afa8b1e8833f52d25d07f9e",
+  "hash": "4d4f86a6d2ec696d35f1710fe4f33424980dda50fc1844cbb5e923c9f3e395d2"
+}

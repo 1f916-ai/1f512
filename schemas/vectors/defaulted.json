@@ -1,0 +1,53 @@
+{
+  "commitment": "c-demo-defaulted",
+  "verdict": "DEFAULTED",
+  "reason": "outflow_never_disclosed_within_window",
+  "rpc": [
+    {
+      "provider": "alpha",
+      "method": "eth_getLogs",
+      "params": [
+        {
+          "address": "0xtoken",
+          "fromBlock": "0x64",
+          "toBlock": "0xc8"
+        }
+      ],
+      "result": [
+        {
+          "tx": "0xout1",
+          "from": "0xsubject",
+          "to": "0xelsewhere",
+          "value": "500",
+          "at_time": 1699999000000
+        }
+      ],
+      "at_block": 200
+    },
+    {
+      "provider": "beta",
+      "method": "eth_getLogs",
+      "params": [
+        {
+          "address": "0xtoken",
+          "fromBlock": "0x64",
+          "toBlock": "0xc8"
+        }
+      ],
+      "result": [
+        {
+          "tx": "0xout1",
+          "from": "0xsubject",
+          "to": "0xelsewhere",
+          "value": "500",
+          "at_time": 1699999000000
+        }
+      ],
+      "at_block": 200
+    }
+  ],
+  "read_at": 1700000003000,
+  "note": "window closed; disclosure never arrived; no writer mark required",
+  "prev_hash": "fdc2675211b9d098b362026acd76b6a227e5af98340cfb2a6e2407ad0d4b6d88",
+  "hash": "ebdcfb3b21a8034f2d42bd43a7bb55f0a41776c5cb2b210259dae3846495cf69"
+}
