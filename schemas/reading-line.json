@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1f916-ai/1f512/schemas/reading-line.json",
+  "title": "1f512 reading line",
+  "description": "One append-only JSONL row from the falsifiability registry. A stranger with an RPC recomputes the verdict from the published exchanges; the row is hash-chained so a removed or reordered line breaks every successor. Soft-power: a schema that only encodes HELD is not a schema for this project — UNREADABLE and DEFAULTED are first-class verdicts, not error paths. Provider values are labels, never URLs (RPC paths carry keys; this log is public and append-only).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "commitment",
+    "verdict",
+    "reason",
+    "rpc",
+    "read_at",
+    "prev_hash",
+    "hash"
+  ],
+  "properties": {
+    "commitment": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Id of the commitment this reading is about."
+    },
+    "verdict": {
+      "type": "string",
+      "description": "Closed four-verdict set. A format that drops UNREADABLE or DEFAULTED pushes failure into prose where nothing can check it.",
+      "enum": ["HELD", "BROKEN", "UNREADABLE", "DEFAULTED"]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Machine-branchable why. Prose belongs in note."
+    },
+    "rpc": {
+      "type": "array",
+      "description": "Every exchange that produced this verdict. HELD/BROKEN/DEFAULTED require two agreeing providers (minItems 2). UNREADABLE may carry zero, one, or two — a failed attempt is evidence, not something to invent an exchange for.",
+      "items": { "$ref": "#/$defs/rpcExchange" }
+    },
+    "read_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "When the reading was taken, ms since epoch, UTC. Not Date.now() inside pure evaluate — the caller supplies T."
+    },
+    "note": {
+      "type": "string",
+      "description": "Optional human prose (provider error text, operator context). Never a substitute for reason."
+    },
+    "prev_hash": {
+      "type": "string",
+      "description": "Hash of the previous line, or empty string for the first. Chaining on the recomputed hash, not the claimed one.",
+      "pattern": "^([0-9a-f]{64})?$"
+    },
+    "hash": {
+      "type": "string",
+      "description": "sha256 hex over the canonical preimage of content + prev_hash.",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sig": {
+      "type": "string",
+      "description": "Optional signature over hash, base64url. Proves who wrote, never that what they wrote is true."
+    },
+    "key": {
+      "type": "string",
+      "description": "Optional key id that produced sig."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "verdict": { "enum": ["HELD", "BROKEN", "DEFAULTED"] } },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "rpc": { "minItems": 2 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "rpcExchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "method", "params", "result", "at_block"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Stable label for the endpoint, NEVER its URL. A URL-shaped value is a published API key waiting to happen.",
+          "pattern": "^(?!.*://)(?!.*\\/).+$"
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1,
+          "description": "RPC method name, e.g. eth_getLogs."
+        },
+        "params": {
+          "type": "array",
+          "description": "RPC params as sent. A stranger re-asks with these."
+        },
+        "result": {
+          "description": "Response as received. This is what a stranger re-derives the verdict from."
+        },
+        "at_block": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Block height the answer was pinned to."
+        }
+      }
+    }
+  }
+}
