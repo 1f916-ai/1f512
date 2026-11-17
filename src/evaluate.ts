@@ -17,7 +17,7 @@
 // So: no Date.now() anywhere in this file. T is an argument. A reader supplies
 // it, a test supplies it, and the answer is the same either way.
 
-import type { ChainState, Commitment, Transfer } from "./commitment.ts";
+import type { ChainState, Commitment, Disclosure, Transfer } from "./commitment.ts";
 import { cmpDec } from "./commitment.ts";
 import type { Verdict } from "./reading.ts";
 
@@ -26,7 +26,10 @@ export interface Evaluation {
   /** Machine-readable. Callers branch on this, never on prose. */
   reason: string;
   /** The transfer or balance that decided it, when one did. Evidence, not decoration. */
-  evidence?: Transfer | { subject: string; balance: string; floor: string };
+  evidence?:
+    | Transfer
+    | { subject: string; balance: string; floor: string }
+    | { tx: string; deadline: number; absent_at: number | null; present_at: number };
 }
 
 /** Is a transfer inside this commitment's window? */
@@ -93,22 +96,45 @@ export function evaluate(c: Commitment, chain: ChainState, T: number): Evaluatio
       const outflows = chain.transfers.filter(
         (t) => t.from === subject && t.token === p.token && inWindow(t.at_time, c),
       );
+      // Scan every outflow before answering: a provable default anywhere beats
+      // an undecidable bracket elsewhere, because DEFAULTED is a statement
+      // about the subject and UNREADABLE is a statement about the instrument.
+      let undecidable: Evaluation | null = null;
       for (const t of outflows) {
+        const D = t.at_time + deadlineMs;
         const d = chain.disclosures?.[t.tx];
-        if (d && d.at_time <= t.at_time + deadlineMs) continue; // disclosed in time
+
+        if (d) {
+          const verdict = decideBracket(t.tx, d, D);
+          if (verdict === null) continue; // provably in time
+          if (verdict.verdict === "DEFAULTED") return verdict;
+          undecidable ??= verdict;
+          continue;
+        }
+
         // UNDISCLOSED, BUT IS IT LATE YET? An outflow with no disclosure is not
         // a break until its deadline has passed at T. Reporting BROKEN the
         // instant a transfer lands would punish someone who is still inside the
         // window they were given, and the whole point of this predicate is that
         // the window exists.
-        if (T > t.at_time + deadlineMs) {
-          return {
-            verdict: "DEFAULTED",
-            reason: d ? "disclosure arrived after the deadline" : "outflow never disclosed within the window",
-            evidence: t,
-          };
+        if (T <= D) continue;
+
+        // SILENCE IS ONLY EVIDENCE AS OF WHEN IT WAS HEARD. The disclosure set
+        // in this chain state is complete as of at_time, not as of T. A row
+        // read before the deadline proves nothing about a disclosure that
+        // arrived after the read, so deciding this on T alone would publish a
+        // false accusation from a stale snapshot -- the same failure as reading
+        // a missing balance as zero.
+        if (chain.at_time > D) {
+          return { verdict: "DEFAULTED", reason: "outflow never disclosed within the window", evidence: t };
         }
+        undecidable ??= {
+          verdict: "UNREADABLE",
+          reason: "chain state predates the disclosure deadline; silence after the read was not observed",
+          evidence: t,
+        };
       }
+      if (undecidable) return undecidable;
       return heldOrOpen(c, T, outflows.length ? "every outflow disclosed, or still inside its window" : "no outflow to disclose");
     }
   }
@@ -117,6 +143,34 @@ export function evaluate(c: Commitment, chain: ChainState, T: number): Evaluatio
   // know what this commitment means" must never look like "this commitment is
   // being kept".
   return { verdict: "UNREADABLE", reason: `unknown predicate kind ${JSON.stringify((p as { kind: string }).kind)}` };
+}
+
+/**
+ * Decide one disclosure bracket against its deadline D (issue #31).
+ *
+ * Returns null when the disclosure provably arrived in time, DEFAULTED when it
+ * provably arrived late, and UNREADABLE when the watcher's cadence could not
+ * place the arrival on one side of D. The straddle is an instrument failure --
+ * the cadence was too coarse to answer -- and this registry already has a
+ * verdict for "the instrument could not answer". It must never read as HELD.
+ *
+ * `claimed_at` is deliberately not consulted: the subject controls any time it
+ * writes into a disclosure. Testimony is recorded, never decides.
+ */
+function decideBracket(tx: string, d: Disclosure, D: number): Evaluation | null {
+  const bracket = { tx, deadline: D, absent_at: d.absent_at, present_at: d.present_at };
+  // A bracket whose bounds are out of order proves nothing in either direction.
+  if (d.absent_at !== null && d.absent_at >= d.present_at) {
+    return { verdict: "UNREADABLE", reason: "malformed disclosure bracket: absent_at is not before present_at", evidence: bracket };
+  }
+  if (d.present_at <= D) return null; // a chained row carried it at or before the deadline
+  if (d.absent_at !== null && d.absent_at >= D) {
+    // A chained row at or past the deadline still lacked it: provably late.
+    return { verdict: "DEFAULTED", reason: "disclosure arrived after the deadline", evidence: bracket };
+  }
+  // The bracket straddles D (or the disclosure was never observed absent and
+  // first appeared after D). The arrival cannot be placed.
+  return { verdict: "UNREADABLE", reason: "disclosure arrival not decidable at this cadence", evidence: bracket };
 }
 
 /**
