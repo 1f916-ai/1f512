@@ -28,7 +28,27 @@ export interface ChainState {
   /** Balances by address, as decimal STRINGS. Never numbers -- see reading.ts. */
   balances: Record<Address, string>;
   /** Disclosures the subject published, keyed by the tx hash they refer to. */
-  disclosures?: Record<string, { at_time: number }>;
+  disclosures?: Record<string, Disclosure>;
+}
+
+/**
+ * When a disclosure arrived, recorded as a BRACKET, not a timestamp (issue #31).
+ *
+ * A single `at_time` is whoever-built-this-state's word: nothing downstream can
+ * check it, so an operator could backdate a late disclosure (or postdate an
+ * on-time one) and the published log would still verify -- the lie would be in
+ * the input. Both bounds here are the `at_time`s of the watcher's own
+ * hash-chained reading rows: the last row that LACKED the disclosure and the
+ * first row that CARRIED it. A stranger holding the log checks the ordering,
+ * and backdating either bound means rewriting the chain.
+ */
+export interface Disclosure {
+  /** at_time of the last chained reading row WITHOUT this disclosure; null if never observed absent. */
+  absent_at: number | null;
+  /** at_time of the first chained reading row WITH it. */
+  present_at: number;
+  /** The subject's own claim. Testimony: recorded, never decides. */
+  claimed_at?: number;
 }
 
 export interface Transfer {

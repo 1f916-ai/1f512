@@ -55,7 +55,8 @@ test("DEFAULTED with no writer having run at any point", () => {
     window: WINDOW,
   };
   const out = xfer();
-  const state = chain({ transfers: [out], disclosures: {} });
+  // The chain row was read after the deadline, so its silence covers it (#31).
+  const state = chain({ at_time: out.at_time + 7 * HOUR, transfers: [out], disclosures: {} });
 
   // Before the deadline: not a break yet. The window they were given still runs.
   const early = evaluate(c, state, out.at_time + 5 * HOUR);
@@ -89,8 +90,8 @@ test("advancing T across the deadline flips the verdict with nothing else changi
     window: WINDOW,
   };
   const out = xfer();
-  const state = chain({ transfers: [out], disclosures: {} });
   const deadline = out.at_time + 2 * HOUR;
+  const state = chain({ at_time: deadline + 1, transfers: [out], disclosures: {} });
   assert.equal(evaluate(c, state, deadline).verdict, "HELD", "at the deadline, still inside it");
   assert.equal(evaluate(c, state, deadline + 1).verdict, "DEFAULTED", "one millisecond later, not");
 });
@@ -102,7 +103,10 @@ test("a disclosure that arrived in time is not a default", () => {
     window: WINDOW,
   };
   const out = xfer();
-  const state = chain({ transfers: [out], disclosures: { [out.tx]: { at_time: out.at_time + HOUR } } });
+  const state = chain({
+    transfers: [out],
+    disclosures: { [out.tx]: { absent_at: out.at_time, present_at: out.at_time + HOUR } },
+  });
   assert.equal(evaluate(c, state, out.at_time + 100 * HOUR).verdict, "HELD");
 });
 
@@ -115,10 +119,143 @@ test("a disclosure that arrived LATE is still a default", () => {
     window: WINDOW,
   };
   const out = xfer();
-  const state = chain({ transfers: [out], disclosures: { [out.tx]: { at_time: out.at_time + 9 * HOUR } } });
+  // A chained row at +7h still lacked it; the first row carrying it is at +9h.
+  const state = chain({
+    transfers: [out],
+    disclosures: { [out.tx]: { absent_at: out.at_time + 7 * HOUR, present_at: out.at_time + 9 * HOUR } },
+  });
   const r = evaluate(c, state, out.at_time + 10 * HOUR);
   assert.equal(r.verdict, "DEFAULTED");
   assert.match(r.reason, /after the deadline/);
+});
+
+// Issue #31: a disclosure's arrival is a BRACKET from the watcher's own chained
+// rows, not a timestamp anyone could write. Design: trust-but-reread, square
+// c141699; implementation c145592.
+
+const disclosedIn6h: Commitment = {
+  id: "c-31",
+  predicate: { kind: "disclosed-within", subject: SUBJ, token: TOKEN, hours: 6 },
+  window: WINDOW,
+};
+
+test("a bracket that straddles the deadline is UNREADABLE, never HELD or DEFAULTED", () => {
+  // Killing mutation: treat the straddle as on-time (or as late). The cadence
+  // could not place the arrival, and only UNREADABLE says so.
+  const out = xfer();
+  const state = chain({
+    at_time: out.at_time + 10 * HOUR,
+    transfers: [out],
+    disclosures: { [out.tx]: { absent_at: out.at_time + 5 * HOUR, present_at: out.at_time + 7 * HOUR } },
+  });
+  const r = evaluate(disclosedIn6h, state, out.at_time + 10 * HOUR);
+  assert.equal(r.verdict, "UNREADABLE");
+  assert.match(r.reason, /not decidable at this cadence/);
+  assert.deepEqual(r.evidence, {
+    tx: out.tx,
+    deadline: out.at_time + 6 * HOUR,
+    absent_at: out.at_time + 5 * HOUR,
+    present_at: out.at_time + 7 * HOUR,
+  }, "the evidence carries both bounds and the deadline");
+});
+
+test("a disclosure never observed absent and first seen late is UNREADABLE", () => {
+  const out = xfer();
+  const state = chain({
+    at_time: out.at_time + 10 * HOUR,
+    transfers: [out],
+    disclosures: { [out.tx]: { absent_at: null, present_at: out.at_time + 8 * HOUR } },
+  });
+  assert.equal(evaluate(disclosedIn6h, state, out.at_time + 10 * HOUR).verdict, "UNREADABLE");
+});
+
+test("THE TWO PATHS DRAW THE DEADLINE IN THE SAME PLACE", () => {
+  // trust-but-reread's review of #32 (square c151626): the bracket path
+  // convicted at absent_at >= D while the silence path needs at_time > D, so
+  // one fact -- a chained row at exactly D lacked the disclosure -- read
+  // DEFAULTED on one path and UNREADABLE on the other. The deadline is
+  // inclusive, so a row at exactly D proves nothing yet.
+  //
+  // Killing mutation: restore >= in decideBracket; the bracket case below
+  // turns DEFAULTED and the two assertions disagree.
+  const out = xfer();
+  const D = out.at_time + 6 * HOUR;
+  const bracketAtD = chain({
+    at_time: out.at_time + 10 * HOUR,
+    transfers: [out],
+    disclosures: { [out.tx]: { absent_at: D, present_at: D + HOUR } },
+  });
+  const silentAtD = chain({ at_time: D, transfers: [out], disclosures: {} });
+  const T = out.at_time + 10 * HOUR;
+  assert.equal(evaluate(disclosedIn6h, bracketAtD, T).verdict, "UNREADABLE", "bracket path: a row at exactly D is not proof");
+  assert.equal(evaluate(disclosedIn6h, silentAtD, T).verdict, "UNREADABLE", "silence path: a read at exactly D is not proof");
+  // One millisecond past D, both paths convict.
+  const bracketPast = chain({
+    at_time: out.at_time + 10 * HOUR,
+    transfers: [out],
+    disclosures: { [out.tx]: { absent_at: D + 1, present_at: D + HOUR } },
+  });
+  const silentPast = chain({ at_time: D + 1, transfers: [out], disclosures: {} });
+  assert.equal(evaluate(disclosedIn6h, bracketPast, T).verdict, "DEFAULTED");
+  assert.equal(evaluate(disclosedIn6h, silentPast, T).verdict, "DEFAULTED");
+});
+
+test("claimed_at is testimony and never decides", () => {
+  // Killing mutation: honor claimed_at. A subject that writes an early time
+  // into its own disclosure would turn a provable default into HELD.
+  const out = xfer();
+  const state = chain({
+    at_time: out.at_time + 10 * HOUR,
+    transfers: [out],
+    disclosures: {
+      [out.tx]: { absent_at: out.at_time + 7 * HOUR, present_at: out.at_time + 9 * HOUR, claimed_at: out.at_time + HOUR },
+    },
+  });
+  assert.equal(evaluate(disclosedIn6h, state, out.at_time + 10 * HOUR).verdict, "DEFAULTED");
+});
+
+test("A STALE SNAPSHOT NEVER PROVES SILENCE", () => {
+  // Killing mutation: decide the never-disclosed case on T instead of the
+  // row's own at_time. A chain read at +2h says nothing about a disclosure
+  // filed at +5h, so reading it at T = +10h against a 6h deadline must not
+  // publish DEFAULTED -- that would be a false accusation, permanently.
+  const out = xfer();
+  const state = chain({ at_time: out.at_time + 2 * HOUR, transfers: [out], disclosures: {} });
+  const r = evaluate(disclosedIn6h, state, out.at_time + 10 * HOUR);
+  assert.equal(r.verdict, "UNREADABLE");
+  assert.match(r.reason, /predates the disclosure deadline/);
+});
+
+test("a malformed bracket proves nothing", () => {
+  // Killing mutation: drop the ordering check. absent_at after present_at
+  // would otherwise read as a provable default.
+  const out = xfer();
+  const state = chain({
+    at_time: out.at_time + 10 * HOUR,
+    transfers: [out],
+    disclosures: { [out.tx]: { absent_at: out.at_time + 9 * HOUR, present_at: out.at_time + 8 * HOUR } },
+  });
+  const r = evaluate(disclosedIn6h, state, out.at_time + 10 * HOUR);
+  assert.equal(r.verdict, "UNREADABLE");
+  assert.match(r.reason, /malformed/);
+});
+
+test("a provable default on one outflow beats an undecidable bracket on another", () => {
+  // DEFAULTED is a statement about the subject; UNREADABLE is a statement about
+  // the instrument. The first one found must not hide the second.
+  const straddle = xfer({ tx: "0x" + "33".repeat(32) });
+  const late = xfer({ tx: "0x" + "34".repeat(32), at_time: FROM + 2 * HOUR });
+  const state = chain({
+    at_time: FROM + 20 * HOUR,
+    transfers: [straddle, late],
+    disclosures: {
+      [straddle.tx]: { absent_at: straddle.at_time + 5 * HOUR, present_at: straddle.at_time + 7 * HOUR },
+      [late.tx]: { absent_at: late.at_time + 7 * HOUR, present_at: late.at_time + 9 * HOUR },
+    },
+  });
+  const r = evaluate(disclosedIn6h, state, FROM + 20 * HOUR);
+  assert.equal(r.verdict, "DEFAULTED");
+  assert.equal((r.evidence as { tx: string }).tx, late.tx);
 });
 
 test("a break is BROKEN regardless of when you read it", () => {
