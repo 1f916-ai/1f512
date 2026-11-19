@@ -169,6 +169,37 @@ test("a disclosure never observed absent and first seen late is UNREADABLE", () 
   assert.equal(evaluate(disclosedIn6h, state, out.at_time + 10 * HOUR).verdict, "UNREADABLE");
 });
 
+test("THE TWO PATHS DRAW THE DEADLINE IN THE SAME PLACE", () => {
+  // trust-but-reread's review of #32 (square c151626): the bracket path
+  // convicted at absent_at >= D while the silence path needs at_time > D, so
+  // one fact -- a chained row at exactly D lacked the disclosure -- read
+  // DEFAULTED on one path and UNREADABLE on the other. The deadline is
+  // inclusive, so a row at exactly D proves nothing yet.
+  //
+  // Killing mutation: restore >= in decideBracket; the bracket case below
+  // turns DEFAULTED and the two assertions disagree.
+  const out = xfer();
+  const D = out.at_time + 6 * HOUR;
+  const bracketAtD = chain({
+    at_time: out.at_time + 10 * HOUR,
+    transfers: [out],
+    disclosures: { [out.tx]: { absent_at: D, present_at: D + HOUR } },
+  });
+  const silentAtD = chain({ at_time: D, transfers: [out], disclosures: {} });
+  const T = out.at_time + 10 * HOUR;
+  assert.equal(evaluate(disclosedIn6h, bracketAtD, T).verdict, "UNREADABLE", "bracket path: a row at exactly D is not proof");
+  assert.equal(evaluate(disclosedIn6h, silentAtD, T).verdict, "UNREADABLE", "silence path: a read at exactly D is not proof");
+  // One millisecond past D, both paths convict.
+  const bracketPast = chain({
+    at_time: out.at_time + 10 * HOUR,
+    transfers: [out],
+    disclosures: { [out.tx]: { absent_at: D + 1, present_at: D + HOUR } },
+  });
+  const silentPast = chain({ at_time: D + 1, transfers: [out], disclosures: {} });
+  assert.equal(evaluate(disclosedIn6h, bracketPast, T).verdict, "DEFAULTED");
+  assert.equal(evaluate(disclosedIn6h, silentPast, T).verdict, "DEFAULTED");
+});
+
 test("claimed_at is testimony and never decides", () => {
   // Killing mutation: honor claimed_at. A subject that writes an early time
   // into its own disclosure would turn a provable default into HELD.

@@ -164,8 +164,12 @@ function decideBracket(tx: string, d: Disclosure, D: number): Evaluation | null 
     return { verdict: "UNREADABLE", reason: "malformed disclosure bracket: absent_at is not before present_at", evidence: bracket };
   }
   if (d.present_at <= D) return null; // a chained row carried it at or before the deadline
-  if (d.absent_at !== null && d.absent_at >= D) {
-    // A chained row at or past the deadline still lacked it: provably late.
+  if (d.absent_at !== null && d.absent_at > D) {
+    // A chained row PAST the deadline still lacked it: provably late. Strictly
+    // past, because the deadline is inclusive (present_at <= D is in time), so
+    // a row at exactly D lacking it leaves an arrival AT D still possible. This
+    // is the same boundary the never-disclosed path draws with chain.at_time > D;
+    // the two paths must convict on the same fact or neither.
     return { verdict: "DEFAULTED", reason: "disclosure arrived after the deadline", evidence: bracket };
   }
   // The bracket straddles D (or the disclosure was never observed absent and
