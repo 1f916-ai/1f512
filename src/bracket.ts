@@ -39,7 +39,14 @@ export interface Sighting {
 
 export interface BracketAnomaly {
   tx: string;
-  problem: "flap";
+  /**
+   * "flap": a row LACKED the disclosure after a row had carried it — the
+   * channel contradicted itself. "same-instant": no contradiction, but the last
+   * row without and the first row with share one at_time, so the bracket has
+   * zero width. Both yield a bracket evaluate() refuses as malformed; they are
+   * different reasons, and the caller deserves the real one.
+   */
+  problem: "flap" | "same-instant";
   detail: string;
 }
 
@@ -97,11 +104,16 @@ export function buildBrackets(sightings: readonly Sighting[]): BuiltBrackets {
   const firstWith = new Map<string, number>();
   const lastWithout = new Map<string, number>();
   const claimed = new Map<string, number>();
+  // Decided by ROW ORDER, not by comparing at_times: with equal at_times allowed,
+  // a carry-then-lack inside one millisecond is a flap, and `absent_at >
+  // present_at` would mislabel it same-instant.
+  const flapped = new Set<string>();
   for (const s of sightings) {
     const carried = new Set(s.disclosed);
     for (const tx of txs) {
       if (!carried.has(tx)) {
         lastWithout.set(tx, s.at_time);
+        if (firstWith.has(tx)) flapped.add(tx);
       } else if (!firstWith.has(tx)) {
         firstWith.set(tx, s.at_time);
         const c = s.claimed?.[tx];
@@ -114,13 +126,21 @@ export function buildBrackets(sightings: readonly Sighting[]): BuiltBrackets {
   const anomalies: BracketAnomaly[] = [];
   for (const [tx, present_at] of firstWith) {
     const absent_at = lastWithout.get(tx) ?? null;
-    if (absent_at !== null && absent_at >= present_at) {
+    if (flapped.has(tx)) {
       anomalies.push({
         tx,
         problem: "flap",
         detail:
           `disclosure carried at ${present_at} but lacking again at ${absent_at}; ` +
           `the bracket below is malformed on purpose and evaluate() will refuse it`,
+      });
+    } else if (absent_at === present_at) {
+      anomalies.push({
+        tx,
+        problem: "same-instant",
+        detail:
+          `last row without and first row with share at_time ${present_at}; ` +
+          `a zero-width bracket cannot place the arrival, and evaluate() will refuse it`,
       });
     }
     disclosures[tx] = {

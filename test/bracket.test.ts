@@ -137,6 +137,26 @@ test("equal at_times are tolerated in the walk and refused by the verdict", () =
   // collapses to absent_at === present_at, which evaluate() treats as
   // malformed. The builder's job is to report what the rows say, and what
   // they say here is too thin to decide on.
-  const { disclosures } = buildBrackets([row(T0), row(T0, [TX])]);
+  //
+  // It is NOT a flap: nothing contradicted itself, the rows are just too close.
+  // Killing mutation: label every absent_at >= present_at as "flap".
+  const { disclosures, anomalies } = buildBrackets([row(T0), row(T0, [TX])]);
   assert.deepEqual(disclosures[TX], { absent_at: T0, present_at: T0 });
+  assert.deepEqual(
+    anomalies.map((a) => [a.tx, a.problem]),
+    [[TX, "same-instant"]],
+  );
+});
+
+test("carried then lacking inside ONE millisecond is still a flap", () => {
+  // Same at_times as the test above, opposite row order. The pair is identical
+  // (T0, T0), so no comparison of at_times can tell these apart; only the row
+  // order can, and here the channel did contradict itself.
+  // Killing mutation: decide flap by `absent_at > present_at`.
+  const { disclosures, anomalies } = buildBrackets([row(T0, [TX]), row(T0)]);
+  assert.deepEqual(disclosures[TX], { absent_at: T0, present_at: T0 });
+  assert.deepEqual(
+    anomalies.map((a) => [a.tx, a.problem]),
+    [[TX, "flap"]],
+  );
 });
