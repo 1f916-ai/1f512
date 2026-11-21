@@ -40,11 +40,13 @@ export interface Sighting {
 export interface BracketAnomaly {
   tx: string;
   /**
-   * "flap": a row LACKED the disclosure after a row had carried it — the
-   * channel contradicted itself. "same-instant": no contradiction, but the last
-   * row without and the first row with share one at_time, so the bracket has
-   * zero width. Both yield a bracket evaluate() refuses as malformed; they are
-   * different reasons, and the caller deserves the real one.
+   * "flap": a later row lacked what an earlier row carried — the channel
+   * contradicted itself. "same-instant": the bounding rows share one
+   * millisecond, so nothing contradicted anything; the rows were just too
+   * close to order. evaluate() refuses the bracket either way (absent_at is
+   * not strictly before present_at), so no verdict moves on this split —
+   * only the stated reason does, and a reason that says "flap" about a
+   * channel that never flapped is the reporter deciding what happened.
    */
   problem: "flap" | "same-instant";
   detail: string;
