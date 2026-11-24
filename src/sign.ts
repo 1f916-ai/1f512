@@ -19,6 +19,21 @@
 // attack and this closes it, and it closes nothing else.
 
 import { canonical, type Reading } from "./reading.ts";
+// The key types, derived from the one call that produces them rather than
+// named as ambient globals. @types/node 22 has no global CryptoKey (PR #29
+// aliased webcrypto.* in a d.ts for it); @types/node 24 declares its own
+// globals, and an alias file fighting those resolves the two names to
+// different types than the global crypto methods return. Deriving from
+// generateKey itself cannot disagree with either graph.
+type GeneratedKey = Awaited<ReturnType<typeof crypto.subtle.generateKey>>;
+type CryptoKeyPair = Extract<GeneratedKey, { privateKey: unknown }>;
+type CryptoKey = CryptoKeyPair["publicKey"];
+
+// A predicate, not inline `in` narrowing: how `in` narrows this union differs
+// between the two type graphs, and the question is a runtime one anyway.
+function isKeyPair(k: GeneratedKey): k is CryptoKeyPair {
+  return typeof k === "object" && k !== null && "privateKey" in k;
+}
 
 export interface SignedHead {
   /** The hash of the last line this signature covers. */
@@ -45,7 +60,11 @@ function unb64u(s: string): Uint8Array {
 
 /** Generate an Ed25519 keypair. The private key never leaves the caller. */
 export async function generateKey(): Promise<CryptoKeyPair> {
-  return (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
+  // No cast: which member of generateKey's declared union Ed25519 yields is a
+  // runtime fact, so check it at runtime. A cast asserts the thing checked.
+  const k: GeneratedKey = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+  if (!isKeyPair(k)) throw new Error("Ed25519 generateKey returned a single key, not a pair");
+  return k;
 }
 
 export async function exportPublicKey(pair: CryptoKeyPair): Promise<string> {
