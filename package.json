@@ -10,5 +10,9 @@
     "typecheck": "tsc --noEmit",
     "demo": "node --experimental-strip-types examples/demo.ts",
     "live": "node --experimental-strip-types examples/live.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "~5.9.2"
   }
 }
